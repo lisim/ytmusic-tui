@@ -96,8 +96,8 @@ impl std::fmt::Display for AuthCliError {
                  Close the browser if it is open, or re-run `ytmusic-tui auth` for the paste flow."
             ),
             Self::SessionCanaryFailed => f.write_str(
-                "Session invalid — the browser cookies are signed out at music.youtube.com. \
-                 Sign in again in the browser, then re-run `ytmusic-tui auth --from-browser <name>`.",
+                "Session verification failed at music.youtube.com. \
+                 Check your connection and browser sign-in, then re-run `ytmusic-tui auth --from-browser <name>`.",
             ),
         }
     }
@@ -202,22 +202,21 @@ pub fn write_browser_json(path: &Path, value: &Value) -> io::Result<()> {
     }
     let text = serde_json::to_string_pretty(value)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    let mut options = std::fs::OpenOptions::new();
-    options.create(true).write(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options.open(path)?;
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let mut file = tempfile::NamedTempFile::new_in(parent)?;
 
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let perms = std::fs::Permissions::from_mode(0o600);
-        file.set_permissions(perms)?;
+        file.as_file().set_permissions(perms)?;
     }
     file.write_all(text.as_bytes())?;
+    file.as_file().sync_all()?;
+    file.persist(path).map_err(|e| e.error)?;
     Ok(())
 }
 
@@ -404,6 +403,10 @@ fn call_rookie(
 fn filter_to_ytm_cookies(cookies: Vec<rookie::enums::Cookie>) -> Vec<(String, String)> {
     let mut by_name: BTreeMap<&'static str, String> = BTreeMap::new();
     for cookie in cookies {
+        let domain = cookie.domain.trim_start_matches('.');
+        if domain != "youtube.com" && !domain.ends_with(".youtube.com") {
+            continue;
+        }
         for &target in YTM_COOKIE_NAMES {
             if cookie.name == target && !by_name.contains_key(target) {
                 by_name.insert(target, cookie.value.clone());
@@ -462,6 +465,10 @@ pub fn run_from_browser(browser: &str) -> i32 {
     let mut out = stdout.lock();
     let mut err = stderr.lock();
     let path = crate::config::config_file("browser.json");
+    let _ = writeln!(
+        out,
+        "This reads YouTube session cookies from your selected browser, saves a local plaintext copy (owner-only on Unix), and sends it to YouTube. This is not OAuth. Use manual header-paste to avoid reading the browser store; it still uses cookies."
+    );
     drive_from_browser_flow(
         browser,
         &mut out,
@@ -470,6 +477,28 @@ pub fn run_from_browser(browser: &str) -> i32 {
         extract_cookies_for_browser,
         validate_session_sync,
     )
+}
+
+/// Renew only the explicitly selected browser's session, preserving saved auth
+/// unless the new cookies pass a signed-in account check. Called off-runtime.
+pub fn refresh_browser_session(
+    browser: &str,
+    path: &Path,
+) -> Result<ytmusic_api::BrowserAuth, ytmusic_api::ApiError> {
+    let code = drive_from_browser_flow(
+        browser,
+        &mut io::sink(),
+        &mut io::sink(),
+        path,
+        extract_cookies_for_browser,
+        validate_session_sync,
+    );
+    if code != 0 {
+        return Err(ytmusic_api::ApiError::MutationFailed(
+            "Could not renew YouTube sign-in. Sign in in your selected browser, then retry; saved auth was kept.".into(),
+        ));
+    }
+    Ok(ytmusic_api::BrowserAuth::load(path)?)
 }
 
 /// The testable core of the `--from-browser` flow.
@@ -565,39 +594,25 @@ where
     0
 }
 
-/// Run [`InnerTubeClient::is_session_valid`] synchronously against `json_str`.
-///
-/// `auth_cli` runs before `main` spawns its own tokio runtime, so this builds
-/// a one-shot current-thread runtime, blocks on the canary, and tears it down.
-/// Per the canary contract:
-///
-/// * `true`  — the auth carries a live signed-in session, OR a network error
-///   prevented us from verifying (we assume valid rather than block a user who
-///   is just offline);
-/// * `false` — the auth parsed but the response shape is the logged-out one.
-///
-/// Any failure to build the client/runtime is treated as `true` for the same
-/// "do not block on unverifiable" reason — the user will discover the broken
-/// auth on the next API call rather than during this CLI invocation.
+/// Require a successful account check before replacing any saved credentials.
+/// Runs before the main runtime or on a blocking worker during renewal.
 fn validate_session_sync(json_str: &str) -> bool {
     let auth = match ytmusic_api::BrowserAuth::from_json_str(json_str) {
         Ok(a) => a,
-        // A malformed JSON here would be our own bug (build_browser_json
-        // already validated everything it cares about). Fail open.
-        Err(_) => return true,
+        Err(_) => return false,
     };
     let client = match ytmusic_api::InnerTubeClient::new(auth) {
         Ok(c) => c,
-        Err(_) => return true,
+        Err(_) => return false,
     };
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
     {
         Ok(rt) => rt,
-        Err(_) => return true,
+        Err(_) => return false,
     };
-    runtime.block_on(client.is_session_valid())
+    runtime.block_on(client.get_account_info()).is_ok()
 }
 
 /// The driver `main` calls when the user types `ytmusic-tui auth`.
@@ -664,6 +679,10 @@ fn drive_auth_flow<R: BufRead, O: Write, E: Write>(
 /// Print the multi-line prompt explaining how to get the headers out of the
 /// browser. Kept short — the README has the full walkthrough.
 fn print_prompt<W: Write>(out: &mut W) {
+    let _ = writeln!(
+        out,
+        "Manual sign-in also copies session cookies. They are saved locally as plaintext (owner-only on Unix) and sent to YouTube; this is not OAuth. Never share the headers or browser.json."
+    );
     let _ = writeln!(out, "ytmusic-tui auth");
     let _ = writeln!(out, "================");
     let _ = writeln!(out);
@@ -1018,6 +1037,34 @@ mod tests {
         assert!(headers["cookie"].contains("__Secure-1PSIDTS=test-session"));
         assert!(headers["cookie"].contains("__Secure-3PSIDTS=test-session"));
         assert!(!headers["cookie"].contains("unrelated"));
+    }
+
+    #[test]
+    fn browser_filter_rejects_unrelated_and_lookalike_domains() {
+        for domain in [
+            "google.com",
+            "notyoutube.com",
+            "youtube.com.example.org",
+            "",
+        ] {
+            let cookies = vec![rookie::enums::Cookie {
+                domain: domain.into(),
+                path: "/".into(),
+                secure: true,
+                expires: None,
+                name: "SAPISID".into(),
+                value: "dummy".into(),
+                http_only: true,
+                same_site: 0,
+            }];
+            assert!(filter_to_ytm_cookies(cookies).is_empty());
+        }
+    }
+
+    #[test]
+    fn session_validation_rejects_malformed_credentials() {
+        assert!(!validate_session_sync("{}"));
+        assert!(!validate_session_sync("not json"));
     }
 
     #[test]

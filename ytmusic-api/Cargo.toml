@@ -17,7 +17,7 @@ path = "src/lib.rs"
 [dependencies]
 # Async runtime. Only the bits the transport needs: a multi-thread runtime so
 # blocking integration callers can spin one up, plus macros for #[tokio::test].
-tokio = { version = "1", default-features = false, features = ["rt", "rt-multi-thread", "macros"] }
+tokio = { version = "1", default-features = false, features = ["rt", "rt-multi-thread", "macros", "sync"] }
 
 # HTTP client. `default-features = false` drops reqwest's bundled OpenSSL/native
 # TLS; `rustls` swaps in a pure-Rust TLS stack that verifies against the OS trust

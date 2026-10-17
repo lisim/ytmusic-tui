@@ -694,6 +694,8 @@ impl InnerTubeClient {
 
     /// Get the like status of a track. See [`get_like_status`].
     pub async fn get_like_status(&self, video_id: &str) -> Result<Option<String>, ApiError> {
+        // Watch responses also work anonymously and can falsely report neutral.
+        self.get_account_info().await?;
         get_like_status(self, video_id).await
     }
 

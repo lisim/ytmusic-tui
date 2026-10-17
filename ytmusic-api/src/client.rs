@@ -6,6 +6,7 @@
 //! with a JSON body of `{...extras, context: {...}}` and the browser-auth
 //! headers (authorization recomputed per call).
 
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use reqwest::header::{
@@ -55,7 +56,9 @@ pub struct AccountInfo {
 #[derive(Clone)]
 pub struct InnerTubeClient {
     http: reqwest::Client,
-    auth: BrowserAuth,
+    auth: Arc<RwLock<BrowserAuth>>,
+    auth_refresh: Option<Arc<dyn Fn() -> Result<BrowserAuth, ApiError> + Send + Sync>>,
+    refresh_lock: Arc<tokio::sync::Mutex<()>>,
     context: Value,
 }
 
@@ -74,12 +77,15 @@ impl InnerTubeClient {
         // forever.  (The Python implementation used requests with no timeout;
         // that was a liability, not a contract.)
         let http = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
             .timeout(Duration::from_secs(15))
             .connect_timeout(Duration::from_secs(5))
             .build()?;
         Ok(Self {
             http,
-            auth,
+            auth: Arc::new(RwLock::new(auth)),
+            auth_refresh: None,
+            refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
             context: build_context(),
         })
     }
@@ -88,6 +94,16 @@ impl InnerTubeClient {
     pub fn from_auth_path(path: impl AsRef<std::path::Path>) -> Result<Self, ApiError> {
         let auth = BrowserAuth::load(path)?;
         Self::new(auth)
+    }
+
+    /// Opt into session renewal. The callback must validate new credentials
+    /// before returning them; it runs on a blocking worker, once per failure.
+    pub fn with_auth_refresh(
+        mut self,
+        refresh: impl Fn() -> Result<BrowserAuth, ApiError> + Send + Sync + 'static,
+    ) -> Self {
+        self.auth_refresh = Some(Arc::new(refresh));
+        self
     }
 
     /// POST to an InnerTube endpoint, returning the parsed JSON response.
@@ -100,12 +116,51 @@ impl InnerTubeClient {
     pub async fn post(&self, endpoint: &str, body_extras: Value) -> Result<Value, ApiError> {
         let url = format!("{YTM_BASE_API}{endpoint}{YTM_PARAMS}");
         let body = self.build_body(body_extras);
+        self.post_url(&url, endpoint, &body).await
+    }
 
+    async fn post_url(&self, url: &str, endpoint: &str, body: &Value) -> Result<Value, ApiError> {
+        let headers = self.request_headers()?;
+        let result = self.send(url, endpoint, body, headers.clone()).await;
+        if !matches!(
+            &result,
+            Err(ApiError::Http {
+                status: 401 | 403,
+                ..
+            })
+        ) {
+            return result;
+        }
+        let Some(refresh) = self.auth_refresh.clone() else {
+            return result;
+        };
+        // Other requests may already have replaced the rejected session.
+        let _guard = self.refresh_lock.lock().await;
+        if self.request_headers()?.get(COOKIE) == headers.get(COOKIE) {
+            let auth = tokio::task::spawn_blocking(move || refresh())
+                .await
+                .map_err(|_| {
+                    ApiError::MutationFailed("Session refresh failed; sign in again.".into())
+                })??;
+            *self.auth.write().unwrap_or_else(|e| e.into_inner()) = auth;
+        }
+        // Retry only an explicit rejection, never a timeout or ambiguous write.
+        self.send(url, endpoint, body, self.request_headers()?)
+            .await
+    }
+
+    async fn send(
+        &self,
+        url: &str,
+        endpoint: &str,
+        body: &Value,
+        headers: HeaderMap,
+    ) -> Result<Value, ApiError> {
         let response = self
             .http
-            .post(&url)
-            .headers(self.request_headers()?)
-            .json(&body)
+            .post(url)
+            .headers(headers)
+            .json(body)
             .send()
             .await?;
 
@@ -127,6 +182,15 @@ impl InnerTubeClient {
             });
         }
 
+        if parsed.pointer("/responseContext/mainAppWebResponseContext/loggedOut")
+            == Some(&Value::Bool(true))
+            || (endpoint == "account/account_menu" && parse_account_info(&parsed).is_err())
+        {
+            return Err(ApiError::Http {
+                status: 401,
+                message: "YouTube session is signed out".into(),
+            });
+        }
         Ok(parsed)
     }
 
@@ -153,6 +217,7 @@ impl InnerTubeClient {
     /// `Cookie` header carries the auth file's cookie plus `SOCS=CAI`.
     fn request_headers(&self) -> Result<HeaderMap, ApiError> {
         let mut headers = HeaderMap::new();
+        let auth = self.auth.read().unwrap_or_else(|e| e.into_inner());
 
         // Replay the auth file's headers as the base. Skip ones we set
         // explicitly below (cookie/authorization/origin) and any that are not
@@ -161,7 +226,7 @@ impl InnerTubeClient {
             if matches!(name, "cookie" | "authorization" | "origin") {
                 continue;
             }
-            if let Some(value) = self.auth.header(name)
+            if let Some(value) = auth.header(name)
                 && let (Ok(header_name), Ok(header_value)) = (
                     HeaderName::from_bytes(name.as_bytes()),
                     HeaderValue::from_str(value),
@@ -180,19 +245,19 @@ impl InnerTubeClient {
         // Origin (signing + CORS): the value the SAPISIDHASH was computed over.
         headers.insert(
             ORIGIN,
-            HeaderValue::from_str(self.auth.origin())
+            HeaderValue::from_str(auth.origin())
                 .map_err(|e| ApiError::Parse(format!("invalid origin header: {e}")))?,
         );
 
         // Authorization: SAPISIDHASH for the current instant.
         headers.insert(
             AUTHORIZATION,
-            HeaderValue::from_str(&self.auth.authorization())
+            HeaderValue::from_str(&auth.authorization())
                 .map_err(|e| ApiError::Parse(format!("invalid authorization header: {e}")))?,
         );
 
         // Cookie: the auth file's cookie, with SOCS appended.
-        let cookie = format!("{}; {SOCS_COOKIE}", self.auth.cookie());
+        let cookie = format!("{}; {SOCS_COOKIE}", auth.cookie());
         headers.insert(
             COOKIE,
             HeaderValue::from_str(&cookie)
@@ -233,7 +298,7 @@ impl InnerTubeClient {
     /// `get_account_info` uses) and walks the same path to the account name. A
     /// logged-out response (served with HTTP 200 when cookies are stale) lacks
     /// the `activeAccountHeaderRenderer` structure, so the required-path lookup
-    /// fails and this returns [`ApiError::Parse`].
+    /// fails and this returns HTTP 401 after any opted-in renewal attempt.
     pub async fn get_account_info(&self) -> Result<AccountInfo, ApiError> {
         let response = self
             .post("account/account_menu", Value::Object(Map::new()))
@@ -243,12 +308,8 @@ impl InnerTubeClient {
 
     /// Best-effort check that the auth carries a signed-in session.
     ///
-    /// Mirrors the Python contract in `src/ytmusic_tui/api.py::is_session_valid`
-    /// exactly:
-    ///
     /// * the account header parses → `true` (signed in);
-    /// * HTTP 200 but the logged-out shape ([`ApiError::Parse`]) → `false` —
-    ///   the "valid-looking but logged-out" auth-rot signal;
+    /// * signed-out shape or HTTP 401/403 → `false`;
     /// * network or transient errors → `true` ("cannot verify, assume valid"):
     ///   the consumer is a startup warning toast, and a false "session
     ///   expired" warning for a merely-offline user is worse than staying
@@ -258,7 +319,12 @@ impl InnerTubeClient {
     pub async fn is_session_valid(&self) -> bool {
         match self.get_account_info().await {
             Ok(_) => true,
-            Err(ApiError::Parse(_)) => false,
+            Err(
+                ApiError::Parse(_)
+                | ApiError::Http {
+                    status: 401 | 403, ..
+                },
+            ) => false,
             // Network or transient errors: cannot verify, assume valid.
             Err(_) => true,
         }
@@ -321,6 +387,133 @@ fn runs_text(node: Option<&Value>) -> Option<String> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn server(replies: Vec<(u16, Value)>) -> (String, std::thread::JoinHandle<Vec<String>>) {
+        use std::io::{BufRead, Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        listener.set_nonblocking(true).unwrap();
+        let handle = std::thread::spawn(move || {
+            let mut cookies = Vec::new();
+            for (status, body) in replies {
+                let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                let mut stream = loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                            assert!(std::time::Instant::now() < deadline, "missing request");
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(e) => panic!("{e}"),
+                    }
+                };
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut reader = std::io::BufReader::new(&stream);
+                let mut length = 0;
+                loop {
+                    let mut line = String::new();
+                    assert!(reader.read_line(&mut line).unwrap() > 0);
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        length = value.trim().parse::<usize>().unwrap();
+                    }
+                    if line.to_ascii_lowercase().starts_with("cookie:") {
+                        cookies.push(line);
+                    }
+                }
+                reader.read_exact(&mut vec![0; length]).unwrap();
+                drop(reader);
+                let body = body.to_string();
+                write!(stream, "HTTP/1.1 {status} Test\r\nContent-Length: {}\r\nConnection: close\r\nContent-Type: application/json\r\n\r\n{body}", body.len()).unwrap();
+            }
+            cookies
+        });
+        (url, handle)
+    }
+
+    fn renewed_auth() -> BrowserAuth {
+        BrowserAuth::from_json_str(r#"{"cookie":"SAPISID=RENEWED"}"#).unwrap()
+    }
+
+    #[tokio::test]
+    async fn rejected_session_refreshes_once_and_clones_share_new_auth() {
+        for (status, body, endpoint) in [
+            (401, json!({}), "like/like"),
+            (403, json!({}), "like/dislike"),
+            (200, json!({"actions": []}), "account/account_menu"),
+            (
+                200,
+                json!({"responseContext":{"mainAppWebResponseContext":{"loggedOut":true}}}),
+                "browse",
+            ),
+        ] {
+            let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let count = calls.clone();
+            let client = dummy_client().with_auth_refresh(move || {
+                count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(renewed_auth())
+            });
+            let clone = client.clone();
+            let (url, server) = server(vec![
+                (status, body),
+                (200, logged_in_response()),
+                (200, logged_in_response()),
+            ]);
+            client.post_url(&url, endpoint, &json!({})).await.unwrap();
+            clone.post_url(&url, endpoint, &json!({})).await.unwrap();
+            let cookies = server.join().unwrap();
+            assert!(cookies[0].contains("DUMMY"));
+            assert!(cookies[1..].iter().all(|c| c.contains("RENEWED")));
+            assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn renewal_is_bounded_and_never_retries_unrelated_errors() {
+        for status in [401, 500] {
+            let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let count = calls.clone();
+            let client = dummy_client().with_auth_refresh(move || {
+                count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(renewed_auth())
+            });
+            let replies = if status == 401 { 2 } else { 1 };
+            let (url, server) = server(vec![(status, json!({})); replies]);
+            assert!(
+                client
+                    .post_url(&url, "like/like", &json!({}))
+                    .await
+                    .is_err()
+            );
+            assert_eq!(server.join().unwrap().len(), replies);
+            assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), replies - 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_or_disabled_refresh_preserves_auth_without_retry() {
+        for enabled in [false, true] {
+            let mut client = dummy_client();
+            if enabled {
+                client = client
+                    .with_auth_refresh(|| Err(ApiError::MutationFailed("refresh failed".into())));
+            }
+            let before = client.request_headers().unwrap()[COOKIE].clone();
+            let (url, server) = server(vec![(401, json!({}))]);
+            assert!(
+                client
+                    .post_url(&url, "like/like", &json!({}))
+                    .await
+                    .is_err()
+            );
+            assert_eq!(server.join().unwrap().len(), 1);
+            assert_eq!(client.request_headers().unwrap()[COOKIE], before);
+        }
+    }
 
     /// A logged-in `account/account_menu` response (trimmed to the path
     /// `get_account_info` walks).

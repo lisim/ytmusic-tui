@@ -95,6 +95,7 @@ pub(super) fn build_metadata(state: &MprisState) -> Metadata {
     if state.video_id.is_empty() {
         return m;
     }
+    m.set("ytmusic:videoId", Some(state.video_id.clone()));
     m.set_title(Some(state.title.clone()));
     // xesam:artist is always an array; an empty artist becomes an empty array
     // (Python: `[track.artist] if track.artist else []`).

@@ -46,6 +46,7 @@ use ratatui::widgets::{Block, Paragraph};
 
 use ytmusic_api::{BrowserAuth, InnerTubeClient};
 use ytmusic_tui::app::{AppCommand, AppEvent, RuntimeHandle, spawn_runtime};
+use ytmusic_tui::auth_cli;
 use ytmusic_tui::config::{self, AppConfig};
 use ytmusic_tui::demo::{self, DemoScreen};
 use ytmusic_tui::keymap::{Action, Keymap, Resolution};
@@ -155,7 +156,7 @@ fn run_rating_request(action: &str, video_id: &str) -> Result<Option<String>, St
         .build()
         .map_err(|e| format!("Could not start rating request: {e}"))?;
     runtime.block_on(async {
-        tokio::time::timeout(Duration::from_secs(20), async {
+        tokio::time::timeout(Duration::from_secs(60), async {
             if action == "get" {
                 client.get_like_status(video_id).await
             } else {
@@ -344,8 +345,15 @@ fn load_client(config: &AppConfig) -> Result<InnerTubeClient, ClientLoadOutcome>
             path.display()
         ))
     })?;
-    InnerTubeClient::new(auth)
-        .map_err(|e| ClientLoadOutcome::Fatal(format!("failed to build API client: {e}")))
+    let mut client = InnerTubeClient::new(auth)
+        .map_err(|e| ClientLoadOutcome::Fatal(format!("failed to build API client: {e}")))?;
+    if let Ok(browser) = std::env::var("YTMUSIC_TUI_AUTH_BROWSER") {
+        auth_cli::parse_browser_name(&browser)
+            .map_err(|e| ClientLoadOutcome::Fatal(e.to_string()))?;
+        client =
+            client.with_auth_refresh(move || auth_cli::refresh_browser_session(&browser, &path));
+    }
+    Ok(client)
 }
 
 /// Expand a leading `~` / `~/…` in a path to `$HOME`.

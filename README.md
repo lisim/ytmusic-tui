@@ -4,6 +4,8 @@ A keyboard-driven YouTube Music player with a practical desktop-friendly interfa
 
 This is **lisim’s customised fork** of [WakaTaira/ytmusic-tui](https://github.com/WakaTaira/ytmusic-tui), based on upstream commit `09114f3076422756811c62889b605429df704813`. It is not an official upstream release. The original MIT licence and upstream history are preserved.
 
+> **Read before signing in: this player uses your YouTube session cookies, not Google OAuth.** Browser sign-in reads your selected browser's local cookie store and saves a plaintext session copy. Manual header-paste also uses cookies. If you do not want to share a browser session with this app, do not authenticate. See [Authentication and privacy](#authentication-and-privacy).
+
 ![Home cards with sample content](screenshots/omarchy-home.png)
 
 ## What this edition adds
@@ -16,7 +18,19 @@ This is **lisim’s customised fork** of [WakaTaira/ytmusic-tui](https://github.
 - **Song ratings:** `f` toggles Like, `Shift+F` toggles Dislike; the helper shows both. The companion mini player can read/set/clear ratings through the same signed-in API.
 - **Start from Play:** `ytmusic-tui --autoplay` plays the first available song from Home once recommendations load. Normal launches stay silent; keyboard input or a sign-in/API error cancels pending autoplay.
 
-It also retains the YouTube session timestamp cookies needed by some accounts when signing in from a browser, and creates authentication files with owner-only permissions.
+It also retains YouTube's rotating session timestamp cookies and supports opt-in renewal of expired sessions without restarting playback.
+
+## Authentication and privacy
+
+**This is unofficial browser-session authentication.** It is not a Google-approved OAuth consent flow, and the cookies are not a narrowly scoped, music-only access token. Treat them like a password: someone with a working copy can act as your signed-in YouTube session.
+
+- **What is read:** `auth --from-browser chrome` (or another explicitly selected browser) uses `rookie` to read/decrypt that browser's local cookie store. Extraction requests YouTube domains; this fork retains an allowlist of cookie names only from `youtube.com` and its subdomains. It does not read your saved Google password. Do not run it unless you trust the app with that session.
+- **Where it is stored/sent:** `browser.json` contains plaintext cookies and request headers. Files written by this fork use owner-only permissions (`0600`) on Unix and atomic replacement; they are not encrypted. The API client sends authentication to `https://music.youtube.com`. The project has no author-operated authentication server or cookie-upload/telemetry service. Never include this file or raw headers in issues, logs, screenshots or backups you share.
+- **Automatic renewal is optional:** standalone launches do not read the browser store automatically. Setting `YTMUSIC_TUI_AUTH_BROWSER=chrome` explicitly enables renewal from that browser when a request is rejected or an account check shows a signed-out session. The newly extracted session must pass an account check before replacing the saved file; the failed request is retried once. Manual authentication alone does not enable renewal. Unset this variable to disable it and restart the player. The Omarchy plugin exposes this as a separate opt-in setting.
+- **Manual does not mean cookie-free:** `ytmusic-tui auth` lets you paste YouTube request headers instead of allowing browser-store extraction. It still stores and uses the supplied cookies. Neither sign-in method is OAuth. Skipping authentication means account features such as your library, personalised mixes and ratings are unavailable.
+- **Removing access:** quit the player and disable automatic renewal before deleting its `browser.json`. Default location: `~/.config/ytmusic-tui/browser.json`; `YTMUSIC_TUI_CONFIG_DIR` or an explicit `browser_auth_path` can change it. Removing the local copy does not revoke copies elsewhere; manage the underlying signed-in session through your Google account if necessary.
+
+YouTube can expire sessions or change its unofficial interface. Renewal cannot recover a browser that is itself signed out, locked or inaccessible; the app reports the failure and preserves the previous auth file. An account check is used for ratings because watch metadata can also be returned anonymously.
 
 ## Use it with Omarchy
 
