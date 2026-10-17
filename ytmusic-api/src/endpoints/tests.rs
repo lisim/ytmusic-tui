@@ -1475,7 +1475,9 @@ fn get_like_status_returns_status_for_matching_video() {
     // The watch_radio fixture (now extended with a LIKE toggleMenuServiceItem
     // on item 0 / dQw4w9WgXcQ) is reused: parse_like_status maps
     // switch_to=INDIFFERENT → current=LIKE.
-    let client = FakePost::new(fixture("watch_radio.json"));
+    let mut response = fixture("watch_radio.json");
+    response.as_object_mut().unwrap().remove("playerOverlays");
+    let client = FakePost::new(response);
     let status = block_on(get_like_status(&client, "dQw4w9WgXcQ")).expect("ok");
     assert_eq!(status, Some("LIKE".to_owned()), "seed track should be LIKE");
 
@@ -1500,6 +1502,24 @@ fn get_like_status_returns_none_for_unknown_video() {
     let client = FakePost::new(fixture("watch_radio.json"));
     let status = block_on(get_like_status(&client, "not_in_fixture")).expect("ok");
     assert_eq!(status, None, "videoId not in panel → None");
+}
+
+#[test]
+fn get_like_status_uses_exact_player_target_and_preserves_dislikes() {
+    for status in ["LIKE", "DISLIKE", "INDIFFERENT"] {
+        let mut response = fixture("watch_radio.json");
+        response["playerOverlays"]["playerOverlayRenderer"]["actions"][0]["likeButtonRenderer"]["likeStatus"] =
+            serde_json::json!(status);
+        let client = FakePost::new(response);
+        assert_eq!(
+            block_on(get_like_status(&client, "dQw4w9WgXcQ")).unwrap(),
+            Some(status.into())
+        );
+        assert_eq!(
+            block_on(get_like_status(&client, "rZlQ28OeGMI")).unwrap(),
+            None
+        );
+    }
 }
 
 #[test]

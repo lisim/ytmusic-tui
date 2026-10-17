@@ -13,6 +13,7 @@ This is **lisim’s customised fork** of [WakaTaira/ytmusic-tui](https://github.
 - **Terminal colours:** choose `theme = "terminal"` to use your terminal palette.
 - **Personal mixes:** later Home sections load, including Mixed for you. Personal mixes open promptly with their first batch of songs.
 - **Desktop controls:** working MPRIS volume changes and upcoming-track metadata for the companion plugin.
+- **Song ratings:** `f` toggles Like, `Shift+F` toggles Dislike; the helper shows both. The companion mini player can read/set/clear ratings through the same signed-in API.
 - **Start from Play:** `ytmusic-tui --autoplay` plays the first available song from Home once recommendations load. Normal launches stay silent; keyboard input or a sign-in/API error cancels pending autoplay.
 
 It also retains the YouTube session timestamp cookies needed by some accounts when signing in from a browser, and creates authentication files with owner-only permissions.
@@ -54,6 +55,7 @@ theme = "terminal"
 | Tab / Shift+Tab | Next / previous card or pane |
 | Up / Down, Enter | Select and play/open |
 | Space, n / p, + / - | Pause, next/previous, volume |
+| f / Shift+F | Like / Dislike the current song; repeat to remove |
 | Esc, F1, Q | Back or leave search input, helper, quit |
 
 After submitting a search with Enter, press Esc to browse its results. Mouse selection is not supported. Closing the terminal quits playback; the companion plugin’s hide action keeps it running.

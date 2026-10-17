@@ -73,6 +73,8 @@ pub enum Action {
     ToggleMute,
     /// Toggle the like state of the current track (`toggle_like`, default `f`).
     ToggleLike,
+    /// Toggle dislike for the current track (`toggle_dislike`, default `F`).
+    ToggleDislike,
     /// Start a radio seeded by the current track (`start_radio`, default `R`).
     StartRadio,
     /// Jump to the current track's artist (`open_current_artist`, default `a`).
@@ -302,6 +304,7 @@ fn action_for_name(name: &str) -> Option<Action> {
         "seek_start" => Action::SeekToStart,
         "toggle_mute" => Action::ToggleMute,
         "toggle_like" => Action::ToggleLike,
+        "toggle_dislike" => Action::ToggleDislike,
         "start_radio" => Action::StartRadio,
         "open_current_artist" => Action::OpenCurrentArtist,
         "open_current_album" => Action::OpenCurrentAlbum,

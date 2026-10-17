@@ -198,6 +198,9 @@ pub fn respond(cmd: &AppCommand) -> Vec<AppEvent> {
         AppCommand::ToggleLike(_) => {
             vec![AppEvent::ActionResult("Liked!".to_owned())]
         }
+        AppCommand::ToggleDislike(_) => {
+            vec![AppEvent::ActionResult("Disliked!".to_owned())]
+        }
 
         AppCommand::RatePlaylist { status, .. } => {
             let toast = if status == "LIKE" {

@@ -143,6 +143,7 @@ pub(crate) async fn rate_playlist(
 /// - The watch playlist returns no tracks.
 /// - No track in the list matches `video_id`.
 /// - The matching track has a `null` / absent `likeStatus`.
+/// - Only the menu toggle is available and it cannot distinguish unrated from disliked.
 ///
 /// Transport / auth errors propagate as `ApiError`.
 pub(crate) async fn get_like_status(
@@ -167,6 +168,23 @@ pub(crate) async fn get_like_status(
     });
     let response = client.post_request("next", body).await?;
 
+    // The player button reports all three states; the menu's like toggle
+    // cannot distinguish a dislike from an unrated song.
+    if let Some(actions) = response
+        .pointer("/playerOverlays/playerOverlayRenderer/actions")
+        .and_then(Value::as_array)
+    {
+        for action in actions {
+            let button = &action["likeButtonRenderer"];
+            if button["target"]["videoId"].as_str() == Some(video_id)
+                && let Some(status @ ("LIKE" | "DISLIKE" | "INDIFFERENT")) =
+                    button["likeStatus"].as_str()
+            {
+                return Ok(Some(status.to_owned()));
+            }
+        }
+    }
+
     // parse_radio walks the same playlistPanelRenderer contents as
     // get_watch_playlist; it now emits `likeStatus` for each item.
     let raw_tracks = parse_radio(&response);
@@ -175,7 +193,7 @@ pub(crate) async fn get_like_status(
     for raw in &raw_tracks {
         if raw.get("videoId").and_then(Value::as_str) == Some(video_id) {
             let status = raw.get("likeStatus").and_then(Value::as_str);
-            return Ok(status.map(str::to_owned));
+            return Ok(status.filter(|&value| value == "LIKE").map(str::to_owned));
         }
     }
 

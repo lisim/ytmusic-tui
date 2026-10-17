@@ -107,7 +107,10 @@ pub enum AppCommand {
     /// `playlist_id` identifies the playlist; `title` is echoed back so the UI
     /// can label the track list without a second lookup. Replies with
     /// [`AppEvent::PlaylistTracksLoaded`] or [`AppEvent::ApiError`].
-    FetchPlaylistTracks { playlist_id: String, title: String },
+    FetchPlaylistTracks {
+        playlist_id: String,
+        title: String,
+    },
     /// Run a search (the search view's Enter-confirm). `query` is the text to
     /// search; `filter` restricts the result type when a `#category:` prefix was
     /// used (`"songs"` / `"albums"` / `"artists"` / `"playlists"`), or `None`
@@ -209,11 +212,15 @@ pub enum AppCommand {
     /// `"{name} {artist}"` with the `albums` filter, takes the first hit's
     /// `browse_id`, and replies with [`AppEvent::AlbumLoaded`]. Mirrors Python's
     /// `_lookup_and_open_album`.
-    SearchAndOpenAlbum { name: String, artist: String },
+    SearchAndOpenAlbum {
+        name: String,
+        artist: String,
+    },
     /// Toggle the like state of `video_id` (the `f` key / "Like / Unlike"). Reads
     /// the current status then flips it. Replies with [`AppEvent::ActionResult`]
     /// (a toast) or [`AppEvent::ApiError`].
     ToggleLike(String),
+    ToggleDislike(String),
     /// Save / remove an album or playlist from the user's library (issue #12,
     /// the album / playlist popup's "Save to library" / "Remove from library"
     /// actions). Mirrors [`AppCommand::ToggleLike`] but targets a
@@ -238,7 +245,10 @@ pub enum AppCommand {
     /// Create a new playlist titled `title` and add `video_id` to it (the
     /// picker's "New playlist…" choice). Replies with [`AppEvent::ActionResult`]
     /// or [`AppEvent::ApiError`].
-    CreatePlaylistAndAdd { title: String, video_id: String },
+    CreatePlaylistAndAdd {
+        title: String,
+        video_id: String,
+    },
     /// Remove the queue track with `video_id` (the queue action popup's "Remove
     /// from queue"). The runtime finds the index by id and removes it, then
     /// emits an updated [`AppEvent::QueueSnapshot`]. A no-op (with a toast) when
@@ -674,7 +684,10 @@ fn run_runtime(
                     handle_search_and_open_album(client.as_ref(), &name, &artist, events).await;
                 }
                 AppCommand::ToggleLike(video_id) => {
-                    handle_toggle_like(client.as_ref(), &video_id, events).await;
+                    handle_toggle_rating(client.as_ref(), &video_id, "LIKE", events).await;
+                }
+                AppCommand::ToggleDislike(video_id) => {
+                    handle_toggle_rating(client.as_ref(), &video_id, "DISLIKE", events).await;
                 }
                 AppCommand::RatePlaylist {
                     playlist_id,
@@ -1303,12 +1316,11 @@ async fn handle_search_and_open_album(
     }
 }
 
-/// Toggle the like state of `video_id`: read the current status and flip it.
-/// Mirrors Python's `_toggle_like` (`INDIFFERENT if status == "LIKE" else
-/// "LIKE"`).
-async fn handle_toggle_like(
+/// Toggle the requested thumb; repeating the current rating clears it.
+async fn handle_toggle_rating(
     client: Option<&InnerTubeClient>,
     video_id: &str,
+    desired: &str,
     events: &StdSender<AppEvent>,
 ) {
     let Some(client) = client else {
@@ -1324,17 +1336,17 @@ async fn handle_toggle_like(
             return;
         }
     };
-    let new_status = if status.as_deref() == Some("LIKE") {
+    let new_status = if status.as_deref() == Some(desired) {
         "INDIFFERENT"
     } else {
-        "LIKE"
+        desired
     };
     match client.rate_track(video_id, new_status).await {
         Ok(()) => {
-            let toast = if new_status == "LIKE" {
-                "Liked"
-            } else {
-                "Like removed"
+            let toast = match new_status {
+                "LIKE" => "Liked",
+                "DISLIKE" => "Disliked",
+                _ => "Rating removed",
             };
             let _ = events.send(AppEvent::ActionResult(toast.to_owned()));
         }
@@ -1346,7 +1358,7 @@ async fn handle_toggle_like(
 
 /// Save / remove `playlist_id` from the user's library (issue #12).
 ///
-/// Mirrors [`handle_toggle_like`] but for albums / playlists: the same
+/// Mirrors [`handle_toggle_rating`] but for albums / playlists: the same
 /// `like/{like,removelike}` endpoint family, with `{target: {playlistId}}`
 /// instead of `{target: {videoId}}`. Unlike the track toggle there is no
 /// `get_like_status` equivalent for playlists, so `status` is passed in by

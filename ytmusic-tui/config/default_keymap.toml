@@ -39,6 +39,7 @@ seek_start = "circumflex_accent"
 toggle_mute = "underscore"
 cycle_audio_quality = "b"
 toggle_like = "f"
+toggle_dislike = "F"
 start_radio = "R"
 switch_history = "H"
 

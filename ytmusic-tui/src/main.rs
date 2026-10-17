@@ -82,6 +82,9 @@ fn main() {
     let argv: Vec<String> = std::env::args().collect();
     let mut out = io::stdout();
     let mut err = io::stderr();
+    if let Some(code) = dispatch_rating(&argv, &mut out, &mut err, run_rating_request) {
+        std::process::exit(code);
+    }
     if let Some(code) = dispatch_auth(
         &argv,
         &mut out,
@@ -95,6 +98,75 @@ fn main() {
     // terminal is touched. `run` returns an exit code; non-zero on a fatal
     // setup error (already reported to stderr).
     std::process::exit(run(argv.iter().any(|arg| arg == "--autoplay")));
+}
+
+fn dispatch_rating<F>(
+    argv: &[String],
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+    request: F,
+) -> Option<i32>
+where
+    F: FnOnce(&str, &str) -> Result<Option<String>, String>,
+{
+    if argv.get(1).map(String::as_str) != Some("rating") {
+        return None;
+    }
+    let [_, _, action, video_id] = argv else {
+        let _ = writeln!(
+            err,
+            "Usage: ytmusic-tui rating get|LIKE|DISLIKE|INDIFFERENT VIDEO_ID"
+        );
+        return Some(2);
+    };
+    if !matches!(action.as_str(), "get" | "LIKE" | "DISLIKE" | "INDIFFERENT")
+        || video_id.is_empty()
+        || video_id.len() > 128
+        || !video_id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    {
+        let _ = writeln!(err, "Invalid rating action or video ID");
+        return Some(2);
+    }
+    match request(action, video_id) {
+        Ok(status) => {
+            let _ = writeln!(
+                out,
+                "{}",
+                serde_json::json!({"video_id": video_id, "status": status.unwrap_or_else(|| "UNKNOWN".into())})
+            );
+            Some(0)
+        }
+        Err(message) => {
+            let _ = writeln!(err, "{message}");
+            Some(1)
+        }
+    }
+}
+
+fn run_rating_request(action: &str, video_id: &str) -> Result<Option<String>, String> {
+    let config = config::load_config(None, None)
+        .map_err(|e| format!("Could not load player config: {e}"))?;
+    let client = load_client(&config)
+        .map_err(|_| "Sign in with ytmusic-tui auth before rating songs".to_owned())?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| format!("Could not start rating request: {e}"))?;
+    runtime.block_on(async {
+        tokio::time::timeout(Duration::from_secs(20), async {
+            if action == "get" {
+                client.get_like_status(video_id).await
+            } else {
+                client.rate_track(video_id, action).await?;
+                Ok(Some(action.to_owned()))
+            }
+        })
+        .await
+        .map_err(|_| "YouTube Music rating request timed out".to_owned())?
+        .map_err(|e| ytmusic_api::classify_api_error(&e))
+    })
 }
 
 /// Resolve the `auth` subcommand off the argv vector.
@@ -1203,6 +1275,11 @@ impl AppModel {
                 runtime.send(AppCommand::ToggleMute);
             }
             Action::ToggleLike => self.toggle_like_current(runtime),
+            Action::ToggleDislike => {
+                if let Some(video_id) = self.current_video_id.clone() {
+                    runtime.send(AppCommand::ToggleDislike(video_id));
+                }
+            }
             Action::StartRadio => self.start_radio_current(runtime),
             Action::OpenCurrentArtist => self.open_current_artist(runtime),
             Action::OpenCurrentAlbum => self.open_current_album(runtime),
@@ -2236,6 +2313,7 @@ impl AppModel {
                     ("Space", "Pause"),
                     ("n/p", "Skip"),
                     ("+/-", "Volume"),
+                    ("f/F", "Like/dislike"),
                     (".", "Actions"),
                     ("Q", "Quit"),
                 ],
@@ -3066,6 +3144,61 @@ mod tests {
         let mut model = AppModel::new(Theme::default()); // nothing playing
         model.dispatch_key(key(KeyCode::Char('f')), &runtime);
         assert!(rx.try_recv().is_err(), "no command when nothing is playing");
+    }
+
+    #[test]
+    fn capital_f_toggles_dislike_only_on_current_track() {
+        let (runtime, mut rx) = RuntimeHandle::stub();
+        let mut model = model_with_current_track();
+        model.dispatch_key(key(KeyCode::Char('F')), &runtime);
+        assert_eq!(
+            rx.try_recv().ok(),
+            Some(AppCommand::ToggleDislike("v1".into()))
+        );
+        model.current_video_id = None;
+        model.dispatch_key(key(KeyCode::Char('F')), &runtime);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn rating_cli_returns_confirmed_status_or_error_without_starting_player() {
+        let argv = ["ytmusic-tui", "rating", "DISLIKE", "video_123-45"].map(str::to_owned);
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        assert_eq!(
+            dispatch_rating(&argv, &mut out, &mut err, |action, id| {
+                assert_eq!((action, id), ("DISLIKE", "video_123-45"));
+                Ok(Some(action.into()))
+            }),
+            Some(0)
+        );
+        let body: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(body["status"], "DISLIKE");
+        assert_eq!(body["video_id"], "video_123-45");
+        out.clear();
+        assert_eq!(
+            dispatch_rating(&argv, &mut out, &mut err, |_, _| Err("offline".into())),
+            Some(1)
+        );
+        assert!(out.is_empty());
+        assert_eq!(String::from_utf8(err).unwrap(), "offline\n");
+    }
+
+    #[test]
+    fn rating_cli_rejects_bad_action_or_id_before_accessing_account() {
+        for (action, id) in [
+            ("DELETE", "video"),
+            ("LIKE", ""),
+            ("LIKE", "../file"),
+            ("LIKE", "bad\nvalue"),
+        ] {
+            let argv = ["ytmusic-tui", "rating", action, id].map(str::to_owned);
+            assert_eq!(
+                dispatch_rating(&argv, &mut Vec::new(), &mut Vec::new(), |_, _| panic!(
+                    "invalid request reached account"
+                )),
+                Some(2)
+            );
+        }
     }
 
     #[test]
