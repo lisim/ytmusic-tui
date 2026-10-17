@@ -1068,6 +1068,67 @@ mod tests {
     }
 
     #[test]
+    fn unrelated_cookies_never_reach_session_validation_or_disk() {
+        let cookie = |domain: &str, name: &str, value: &str| rookie::enums::Cookie {
+            domain: domain.into(),
+            path: "/".into(),
+            secure: true,
+            expires: None,
+            name: name.into(),
+            value: value.into(),
+            http_only: true,
+            same_site: 0,
+        };
+        for include_youtube in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("browser.json");
+            std::fs::write(&path, "existing-session").unwrap();
+            let mut raw = vec![
+                cookie("youtube.com.example.invalid", "SID", "UNRELATED_SID"),
+                cookie("notyoutube.com", "SAPISID", "UNRELATED_SAPISID"),
+            ];
+            if include_youtube {
+                raw.extend([
+                    cookie(".youtube.com", "SAPISID", "YOUTUBE_SAPISID"),
+                    cookie("music.youtube.com", "SID", "YOUTUBE_SID"),
+                    cookie("youtube.com", "__Secure-3PSIDTS", "YOUTUBE_TIMESTAMP"),
+                ]);
+            }
+            let mut checks = 0;
+            let code = drive_from_browser_flow(
+                "chrome",
+                &mut io::sink(),
+                &mut io::sink(),
+                &path,
+                |_| Ok(filter_to_ytm_cookies(raw)),
+                |json| {
+                    checks += 1;
+                    assert!(
+                        include_youtube,
+                        "unrelated-only cookies reached network validation"
+                    );
+                    assert!(!json.contains("UNRELATED"));
+                    assert!(json.contains("YOUTUBE_SAPISID"));
+                    assert!(json.contains("YOUTUBE_SID"));
+                    assert!(json.contains("YOUTUBE_TIMESTAMP"));
+                    true
+                },
+            );
+            let saved = std::fs::read_to_string(&path).unwrap();
+            assert!(!saved.contains("UNRELATED"));
+            if include_youtube {
+                assert_eq!(code, 0);
+                assert_eq!(checks, 1);
+                assert!(saved.contains("YOUTUBE_SID"));
+            } else {
+                assert_eq!(code, 1);
+                assert_eq!(checks, 0);
+                assert_eq!(saved, "existing-session");
+            }
+        }
+    }
+
+    #[test]
     fn build_cookie_header_joins_with_semicolon_space_in_order() {
         let pairs = vec![
             ("__Secure-3PAPISID".to_owned(), "AAA".to_owned()),

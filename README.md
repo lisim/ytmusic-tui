@@ -34,7 +34,19 @@ YouTube can expire sessions or change its unofficial interface. Renewal cannot r
 
 ## Use it with Omarchy
 
-The [Omarchy YouTube Music plugin](https://github.com/lisim/omarchy-ytmusic) provides first-run setup, a choice of this edition or unmodified upstream, a floating show/hide window, playback controls, a vertical volume slider and an Up Next list.
+The [Omarchy YouTube Music plugin](https://github.com/lisim/omarchy-ytmusic) installs only this customised fork. It provides first-run setup, a floating show/hide window, playback controls, a vertical volume slider and an Up Next list. WakaTaira remains credited as the original TUI author; the upstream MIT licence is unchanged.
+
+## Security improvements in this fork
+
+Compared with our upstream base revision, this edition adds these specific protections:
+
+- **Cookie domain boundaries:** the browser reader's substring search is not trusted. Before building headers or validating a session, we accept cookie rows only from `youtube.com` or a domain ending in `.youtube.com`, then apply the cookie-name allowlist. Lookalikes such as `youtube.com.example.invalid` and `notyoutube.com` are rejected. This check applies to initial browser import and automatic renewal.
+- **Validated renewal:** replacements must pass a signed-in account check. Failure retains the saved session; an explicitly rejected request is retried only once. Rating reads also check sign-in because watch metadata can be returned anonymously.
+- **Private atomic writes:** auth is written to an owner-only temporary file and atomically replaces the saved file after validation, avoiding partial writes. It remains plaintext, not encrypted storage.
+- **No HTTP redirects for authenticated API calls:** session credentials are used against the fixed YouTube Music API endpoint; the client does not follow redirect responses.
+- **Regression coverage:** synthetic unrelated-domain cookies are rejected before the validation callback and are absent from saved auth; valid YouTube cookies survive. The tests use dummy credentials and do not access a real browser account.
+
+These are targeted improvements, not a security certification. Cookies still grant access to a signed-in session. Manual header-paste stores the supplied cookie header and cannot recover its per-cookie domain provenance; paste only headers from an actual `music.youtube.com` request. The companion plugin no longer offers the unpatched Original backend and requires fresh sign-in when migrating an old Original installation.
 
 ## Build it yourself
 
