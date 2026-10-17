@@ -289,12 +289,53 @@ pub fn load_config(
         RawAppConfig::default()
     };
 
-    Ok(build_config(merge_raw(base, over)))
+    let explicit_auth_path = over
+        .auth
+        .as_ref()
+        .and_then(|auth| auth.browser_auth_path.as_ref())
+        .is_some();
+    let mut config = build_config(merge_raw(base, over));
+    if std::env::var_os("YTMUSIC_TUI_CONFIG_DIR").is_some() && !explicit_auth_path {
+        config.auth.browser_auth_path = config_file("browser.json").to_string_lossy().into_owned();
+    }
+    Ok(config)
+}
+
+/// Allows a desktop integration to keep the fork separate from upstream settings.
+pub(crate) fn config_file(name: &str) -> PathBuf {
+    let directory = std::env::var_os("YTMUSIC_TUI_CONFIG_DIR").map(PathBuf::from);
+    config_file_in(directory.as_deref(), name)
+}
+
+fn config_file_in(directory: Option<&Path>, name: &str) -> PathBuf {
+    directory
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| expand_tilde(Path::new("~/.config/ytmusic-tui")))
+        .join(name)
+}
+
+#[cfg(test)]
+mod isolated_config_tests {
+    use super::*;
+
+    #[test]
+    fn isolated_config_keeps_all_files_under_the_selected_directory() {
+        for name in ["config.toml", "keymap.toml", "browser.json"] {
+            assert_eq!(
+                config_file_in(Some(Path::new("/tmp/music profile")), name),
+                Path::new("/tmp/music profile").join(name)
+            );
+            assert_eq!(
+                config_file_in(None, name),
+                expand_tilde(Path::new("~/.config/ytmusic-tui")).join(name)
+            );
+        }
+    }
 }
 
 /// Default path for the user config file: `~/.config/ytmusic-tui/config.toml`.
 fn default_user_config_path() -> PathBuf {
-    expand_tilde(Path::new("~/.config/ytmusic-tui/config.toml"))
+    config_file("config.toml")
 }
 
 // ---------------------------------------------------------------------------
@@ -519,7 +560,7 @@ fn apply_keymap_toml(map: &mut HashMap<String, String>, content: &str) -> Result
 
 /// Default path for the user keymap file: `~/.config/ytmusic-tui/keymap.toml`.
 fn default_user_keymap_path() -> PathBuf {
-    expand_tilde(Path::new("~/.config/ytmusic-tui/keymap.toml"))
+    config_file("keymap.toml")
 }
 
 // ---------------------------------------------------------------------------

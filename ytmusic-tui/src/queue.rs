@@ -89,6 +89,26 @@ impl QueueManager {
         self.tracks.clone()
     }
 
+    /// One upcoming pass through the queue, in actual shuffle/repeat order.
+    pub fn upcoming_tracks(&self) -> impl Iterator<Item = &Track> {
+        let start = (self.current_index + 1).max(0) as usize;
+        let (first, wrap) = if self.exhausted {
+            (&self.tracks[0..0], &self.tracks[0..0])
+        } else if self.repeat_mode == RepeatMode::One && self.current_index >= 0 {
+            (&self.tracks[start - 1..start], &self.tracks[0..0])
+        } else {
+            (
+                &self.tracks[start..],
+                &self.tracks[..if self.repeat_mode == RepeatMode::All {
+                    start
+                } else {
+                    0
+                }],
+            )
+        };
+        first.iter().chain(wrap.iter())
+    }
+
     /// Whether shuffle is currently enabled.
     pub fn shuffle(&self) -> bool {
         self.shuffle
@@ -422,6 +442,29 @@ mod tests {
 
     fn make_tracks(count: u32) -> Vec<Track> {
         (1..=count).map(make_track).collect()
+    }
+
+    #[test]
+    fn upcoming_tracks_follow_position_shuffle_and_repeat() {
+        let mut q = QueueManager::new();
+        assert_eq!(q.upcoming_tracks().count(), 0);
+        q.set_playlist(make_tracks(4), 1);
+        assert_eq!(
+            q.upcoming_tracks()
+                .map(|t| t.video_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["vid_3", "vid_4"]
+        );
+        q.toggle_shuffle();
+        assert_eq!(
+            q.upcoming_tracks().cloned().collect::<Vec<_>>(),
+            q.tracks()[2..]
+        );
+        q.set_repeat_mode(RepeatMode::All);
+        assert_eq!(q.upcoming_tracks().count(), 4);
+        q.set_repeat_mode(RepeatMode::One);
+        assert_eq!(q.upcoming_tracks().next(), q.current_track());
+        assert_eq!(q.upcoming_tracks().count(), 1);
     }
 
     // =======================================================================

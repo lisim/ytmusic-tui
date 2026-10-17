@@ -1,21 +1,9 @@
 //! Home screen view (recommendations).
 //!
-//! Port of `src/ytmusic_tui/views/home.py`. Renders the home page as a vertical
-//! stack of recommendation sections, each a selectable list of items (tracks or
-//! playlists). A `(section, item)` cursor tracks the selection; Tab / Shift-Tab
-//! move between sections and Up/Down (or j/k) move within one. Enter on a track
-//! item asks the app to play it.
-//!
-//! # Rendering vs Python
-//!
-//! Textual mounted one `DataTable` per `_SectionTable`; here each non-empty
-//! section becomes one ratatui [`List`] in its own vertical chunk, titled with
-//! the section name. Empty sections are dropped on construction (Python did
-//! `if not section.items: continue` and also marked empty tables
-//! non-focusable), so the cursor only ever addresses sections that have items —
-//! exactly Python's `focusable` set. Simplified rendering (a List per section
-//! instead of Textual's bordered tables) is acceptable for M5a; the navigation
-//! semantics are ported faithfully.
+//! Recommendation sections use Search-style cards in a responsive grid.
+//! Tab / Shift-Tab move between cards; Up/Down (or j/k) move within one.
+//! Enter plays a track or opens a playlist. Empty sections are omitted, and
+//! paging keeps the selected card visible without shrinking its rows away.
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -26,6 +14,7 @@ use ytmusic_api::{HomeSection, HomeSectionItem, Track};
 
 use super::{PageState, Theme, borderless_table, section_title, table_header, table_row};
 use crate::formatting::format_duration;
+use crate::layout::{Orientation, detect_orientation};
 
 /// What an Enter keypress on the home view resolves to.
 ///
@@ -196,8 +185,7 @@ impl HomeView {
     ///
     /// In [`PageState::Loading`] / [`PageState::Error`] a single status line is
     /// drawn (the `Loading...` label or the classified error). In
-    /// [`PageState::Loaded`] each section is drawn as a titled list stacked
-    /// vertically, with the active section's selected row highlighted.
+    /// [`PageState::Loaded`] sections appear as cards with the active row highlighted.
     pub fn render(&self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
         let sections = self.sections();
         if sections.is_empty() {
@@ -224,12 +212,7 @@ impl HomeView {
         frame.render_widget(paragraph, area);
     }
 
-    /// Draw the stacked section tables.
-    ///
-    /// Each section is a one-line accent title followed by a borderless
-    /// DataTable (header + item rows), with a one-row gap between sections,
-    /// reproducing the home SVG (a flat `surface` page with section titles and
-    /// borderless tables, NOT bordered panels).
+    /// Search-style cards, paged so the focused section always stays visible.
     fn render_sections(
         &self,
         frame: &mut Frame<'_>,
@@ -237,30 +220,42 @@ impl HomeView {
         theme: &Theme,
         sections: &[HomeSection],
     ) {
-        // Per section: 1 title row + 1 header row + item rows, plus a 1-row
-        // gap after every section but the last.
-        let mut constraints: Vec<Constraint> = Vec::new();
-        for (idx, section) in sections.iter().enumerate() {
-            constraints.push(Constraint::Length(section_block_height(
-                section.items.len(),
-            )));
-            if idx + 1 < sections.len() {
-                constraints.push(Constraint::Length(SECTION_GAP));
+        let columns = if area.width >= 104
+            && detect_orientation(area.width, area.height) == Orientation::Horizontal
+        {
+            2
+        } else {
+            1
+        };
+        let rows = sections
+            .len()
+            .div_ceil(columns)
+            .min(usize::from((area.height / 10).max(1)));
+        let page_size = columns * rows;
+        let first = self.section_idx / page_size * page_size;
+        let row_areas = Layout::vertical(vec![Constraint::Fill(1); rows])
+            .spacing(1)
+            .split(area);
+        for (row_index, row_area) in row_areas.iter().enumerate() {
+            let cells = Layout::horizontal(vec![Constraint::Fill(1); columns])
+                .spacing(1)
+                .split(*row_area);
+            for (column_index, cell) in cells.iter().enumerate() {
+                let index = first + row_index * columns + column_index;
+                if let Some(section) = sections.get(index) {
+                    self.render_one_section(
+                        frame,
+                        *cell,
+                        theme,
+                        section,
+                        index == self.section_idx,
+                    );
+                }
             }
-        }
-        let chunks = Layout::vertical(constraints).split(area);
-
-        // Section blocks land on the even chunk indices (the odd ones are gaps).
-        for (idx, section) in sections.iter().enumerate() {
-            let Some(&chunk) = chunks.get(idx * 2) else {
-                break;
-            };
-            let is_active = idx == self.section_idx;
-            self.render_one_section(frame, chunk, theme, section, is_active);
         }
     }
 
-    /// Draw a single section: an accent title line over a borderless table.
+    /// Use the same border/title/highlight treatment as a Search pane.
     fn render_one_section(
         &self,
         frame: &mut Frame<'_>,
@@ -272,17 +267,17 @@ impl HomeView {
         if area.height == 0 {
             return;
         }
-        let [title_area, table_area] =
-            Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
-
-        // Section title: accent bold, always (Python `.section-title`); it is
-        // not dimmed when the section is un-focused (the SVG keeps both titles
-        // in accent — only the table styling changes with focus).
-        frame.render_widget(
-            Paragraph::new(Line::from(section_title(theme, &section.title, true)))
-                .style(Style::default().bg(theme.surface)),
-            title_area,
-        );
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(if is_active {
+                theme.accent
+            } else {
+                theme.primary_background
+            }))
+            .style(Style::default().bg(theme.surface))
+            .title(section_title(theme, &section.title, is_active));
+        let table_area = block.inner(area);
+        frame.render_widget(block, area);
 
         // Borderless DataTable: Title / Artist / Info / Duration columns,
         // focused styling on the active section only.
@@ -302,33 +297,16 @@ impl HomeView {
     }
 }
 
-/// Maximum item rows shown per section before it stops growing.
-///
-/// Python capped each section table at `max-height: 12`.
-const SECTION_ITEM_CAP: usize = 12;
-
-/// Blank rows inserted between two stacked sections (the SVG shows a one-row
-/// `surface` gap between "Quick picks" and "Mixed for you").
-const SECTION_GAP: u16 = 1;
-
 /// Column labels for a home section table (matching the SVG header row).
 const HOME_COLUMNS: [&str; 3] = ["Title", "Artist / Info", "Duration"];
 
-/// Fixed column widths (including the one-space cell padding on each side),
-/// matching the SVG lanes: Title 15, Artist/Info 15, Duration 10.
+/// Let titles and artists use the available width, keeping duration compact.
 fn home_widths() -> Vec<Constraint> {
     vec![
-        Constraint::Length(15),
-        Constraint::Length(15),
+        Constraint::Fill(3),
+        Constraint::Fill(2),
         Constraint::Length(10),
     ]
-}
-
-/// Height of one section block: title row + header row + capped item rows.
-fn section_block_height(item_count: usize) -> u16 {
-    let items = item_count.min(SECTION_ITEM_CAP) as u16;
-    // 1 title + 1 header + items.
-    items.saturating_add(2)
 }
 
 /// Format one home item into the three column strings (Title / Artist-Info /
@@ -417,6 +395,50 @@ mod tests {
     }
 
     // -- set_sections / filtering ------------------------------------------
+
+    #[test]
+    fn late_home_section_stays_visible_when_tabbed_to() {
+        let mut view = HomeView::new();
+        view.set_sections(
+            (0..20)
+                .map(|i| HomeSection {
+                    title: format!("Section {i}"),
+                    items: vec![playlist("RDmix", "My Supermix", 20)],
+                })
+                .collect(),
+        );
+        for _ in 0..19 {
+            view.focus_next_section();
+        }
+        let text = render_to_string(&view, 80, 12);
+        assert!(
+            text.contains("Section 19") && text.contains("My Supermix"),
+            "selected section not visible: {text}"
+        );
+    }
+
+    #[test]
+    fn home_cards_use_two_columns_when_wide_and_stack_when_narrow() {
+        let view = two_section_view();
+        let wide = render_to_string(&view, 140, 20);
+        let first_line = wide.lines().next().unwrap();
+        assert!(first_line.contains("Quick picks") && first_line.contains("Listen again"));
+        assert!(first_line.find("Listen again").unwrap() > 70);
+        let narrow = render_to_string(&view, 70, 20);
+        assert!(!narrow.lines().next().unwrap().contains("Listen again"));
+        assert!(narrow.contains("Listen again"));
+    }
+
+    #[test]
+    fn wider_cards_give_long_titles_more_room() {
+        let mut view = two_section_view();
+        let title = "A long title that used to be cut off";
+        view.set_sections(vec![HomeSection {
+            title: "Long titles".into(),
+            items: vec![track("v1", title, "Artist")],
+        }]);
+        assert!(render_to_string(&view, 180, 20).contains(title));
+    }
 
     #[test]
     fn set_sections_drops_empty_sections() {
@@ -604,20 +626,13 @@ mod tests {
     }
 
     #[test]
-    fn loaded_render_is_borderless_on_surface() {
-        // Sections are borderless tables on the surface background — no box
-        // glyphs anywhere (the SVG draws no border chars).
+    fn loaded_render_has_search_style_cards_on_surface() {
         let view = two_section_view();
         let terminal = render_to_terminal(&view, 60, 20);
         let theme = Theme::default();
         let buffer = terminal.backend().buffer();
-        for cell in buffer.content() {
-            assert!(
-                !"┌┐└┘─│".contains(cell.symbol()),
-                "home drew a box border glyph: {:?}",
-                cell.symbol()
-            );
-        }
+        assert_eq!(buffer[(0, 0)].symbol(), "┌");
+        assert_eq!(buffer[(0, 0)].fg, theme.accent);
         // The surface fill is present.
         assert!(
             buffer.content().iter().any(|c| c.bg == theme.surface),

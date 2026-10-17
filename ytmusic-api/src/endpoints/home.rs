@@ -27,27 +27,26 @@ use crate::nav::{
 /// Each output section is `{ "title": <carousel title>, "contents": [<items>] }`.
 /// Returns an empty list when the section list is absent.
 pub(crate) fn parse_home(response: &Value) -> Vec<Value> {
-    let Some(rows) = section_list(response) else {
+    let Some(rows) = section_list(response)
+        .and_then(|list| list.get("contents"))
+        .and_then(Value::as_array)
+    else {
         return Vec::new();
     };
     rows.iter().filter_map(parse_row).collect()
 }
 
 /// `SINGLE_COLUMN_TAB + SECTION_LIST` — the home page's carousel list.
-fn section_list(response: &Value) -> Option<&Vec<Value>> {
-    nav_array(
-        response,
-        &[
-            Step::Key("contents"),
-            Step::Key("singleColumnBrowseResultsRenderer"),
-            Step::Key("tabs"),
-            Step::Index(0),
-            Step::Key("tabRenderer"),
-            Step::Key("content"),
-            Step::Key("sectionListRenderer"),
-            Step::Key("contents"),
-        ],
-    )
+fn section_list(response: &Value) -> Option<&Value> {
+    response.pointer("/contents/singleColumnBrowseResultsRenderer/tabs/0/tabRenderer/content/sectionListRenderer")
+        .or_else(|| response.pointer("/continuationContents/sectionListContinuation"))
+}
+
+pub(crate) fn continuation_token(response: &Value) -> Option<&str> {
+    section_list(response)?
+        .pointer("/continuations/0/nextContinuationData/continuation")?
+        .as_str()
+        .filter(|token| !token.is_empty())
 }
 
 /// Port of one `parse_mixed_content` row (the carousel branch).

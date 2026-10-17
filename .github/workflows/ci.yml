@@ -2,8 +2,11 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [omarchy]
   pull_request:
+
+permissions:
+  contents: read
 
 jobs:
   rust:

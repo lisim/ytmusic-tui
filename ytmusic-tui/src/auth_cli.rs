@@ -34,14 +34,6 @@ use std::path::Path;
 
 use serde_json::{Map, Value};
 
-/// The hardcoded default path the subcommand writes to.
-///
-/// Matches the default in `config/default.toml`. The auth subcommand runs
-/// **before** the TUI loads its config (so we cannot read a customized
-/// `browser_auth_path` here); users who relocate the file in `config.toml` can
-/// move the written file afterwards.
-const DEFAULT_BROWSER_AUTH_PATH: &str = "~/.config/ytmusic-tui/browser.json";
-
 /// Header names the InnerTube client needs from the browser.
 ///
 /// The list mirrors `ytmusicapi.setup.setup` — every other header the user
@@ -210,14 +202,22 @@ pub fn write_browser_json(path: &Path, value: &Value) -> io::Result<()> {
     }
     let text = serde_json::to_string_pretty(value)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    std::fs::write(path, text)?;
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).write(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
 
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let perms = std::fs::Permissions::from_mode(0o600);
-        std::fs::set_permissions(path, perms)?;
+        file.set_permissions(perms)?;
     }
+    file.write_all(text.as_bytes())?;
     Ok(())
 }
 
@@ -277,6 +277,9 @@ const YTM_COOKIE_NAMES: &[&str] = &[
     "__Secure-1PAPISID",
     "__Secure-3PSID",
     "__Secure-1PSID",
+    // YouTube rejects some signed-in sessions without their timestamp cookies.
+    "__Secure-3PSIDTS",
+    "__Secure-1PSIDTS",
     "SAPISID",
     "APISID",
     "HSID",
@@ -458,7 +461,7 @@ pub fn run_from_browser(browser: &str) -> i32 {
     let stderr = io::stderr();
     let mut out = stdout.lock();
     let mut err = stderr.lock();
-    let path = crate::config::expand_tilde(Path::new(DEFAULT_BROWSER_AUTH_PATH));
+    let path = crate::config::config_file("browser.json");
     drive_from_browser_flow(
         browser,
         &mut out,
@@ -610,7 +613,7 @@ pub fn run_auth_flow() -> i32 {
     let mut stdin = stdin.lock();
     let mut stdout = stdout.lock();
     let mut stderr = stderr.lock();
-    let path = crate::config::expand_tilde(Path::new(DEFAULT_BROWSER_AUTH_PATH));
+    let path = crate::config::config_file("browser.json");
     drive_auth_flow(&mut stdin, &mut stdout, &mut stderr, &path)
 }
 
@@ -860,6 +863,21 @@ mod tests {
         assert_eq!(mode & 0o777, 0o600);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn replacing_auth_removes_existing_public_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("browser.json");
+        std::fs::write(&path, "old").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        write_browser_json(&path, &serde_json::json!({"test":"dummy"})).unwrap();
+        assert_eq!(
+            std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
     #[test]
     fn drive_auth_flow_writes_file_on_valid_paste_and_returns_zero() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -977,6 +995,29 @@ mod tests {
         // Display surfaces the rejected name verbatim.
         let msg = err.to_string();
         assert!(msg.contains("netscape"), "msg: {msg}");
+    }
+
+    #[test]
+    fn browser_filter_preserves_session_timestamp_cookies() {
+        let cookies = ["__Secure-1PSIDTS", "__Secure-3PSIDTS", "unrelated"]
+            .into_iter()
+            .map(|name| rookie::enums::Cookie {
+                domain: ".youtube.com".into(),
+                path: "/".into(),
+                secure: true,
+                expires: None,
+                name: name.into(),
+                value: "test-session".into(),
+                http_only: true,
+                same_site: 0,
+            })
+            .collect();
+        let filtered = filter_to_ytm_cookies(cookies);
+        assert_eq!(filtered.len(), 2);
+        let headers = synthesize_headers(build_cookie_header(&filtered));
+        assert!(headers["cookie"].contains("__Secure-1PSIDTS=test-session"));
+        assert!(headers["cookie"].contains("__Secure-3PSIDTS=test-session"));
+        assert!(!headers["cookie"].contains("unrelated"));
     }
 
     #[test]

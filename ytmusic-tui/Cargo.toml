@@ -1,5 +1,6 @@
 [package]
 name = "ytmusic-tui"
+publish = false
 version = "0.2.1"
 edition.workspace = true
 license.workspace = true

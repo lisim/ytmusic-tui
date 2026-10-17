@@ -1,352 +1,74 @@
-# ytmusic-tui
+# ytmusic-tui — Omarchy edition
 
-A terminal music player for YouTube Music, built for keyboard-driven workflows.
+A keyboard-driven YouTube Music player with a practical desktop-friendly interface.
 
-> **Status:** Beta. Playback, search, library, history, lyrics, radio, likes,
-> MPRIS, theming, and custom keymaps are functional.
+This is **lisim’s customised fork** of [WakaTaira/ytmusic-tui](https://github.com/WakaTaira/ytmusic-tui), based on upstream commit `09114f3076422756811c62889b605429df704813`. It is not an official upstream release. The original MIT licence and upstream history are preserved.
 
-> **Maintenance:** This is a hobby project, developed in bursts. Once it does
-> what I need, it may go quiet for stretches — issues and PRs are still
-> welcome, and reviews are best-effort.
+![Home cards with sample content](screenshots/omarchy-home.png)
 
-![Demo: home → play → search → queue → theme switcher](screenshots/out/demo.gif)
+## What this edition adds
 
-![ytmusic-tui home view (synthwave theme)](screenshots/out/home-synthwave.png)
+- **Home cards:** responsive two-column sections, longer titles and keyboard paging.
+- **Visible shortcuts:** a contextual helper along the bottom; F1 hides/shows it.
+- **Terminal colours:** choose `theme = "terminal"` to use your terminal palette.
+- **Personal mixes:** later Home sections load, including Mixed for you. Personal mixes open promptly with their first batch of songs.
+- **Desktop controls:** working MPRIS volume changes and upcoming-track metadata for the companion plugin.
 
-<sub>Home view, synthwave theme. All images are generated from a built-in demo
-dataset (`screenshots/generate.sh`) — no real account data.</sub>
+It also retains the YouTube session timestamp cookies needed by some accounts when signing in from a browser, and creates authentication files with owner-only permissions.
 
-## What is this?
+## Use it with Omarchy
 
-**ytmusic-tui** brings your YouTube Music library to the terminal — playlists,
-search, recommendations, and queue management with vim-style keybindings.
-Inspired by [spotify_player](https://github.com/aome510/spotify_player),
-designed for tiling WM setups.
+The [Omarchy YouTube Music plugin](https://github.com/lisim/omarchy-ytmusic) provides first-run setup, a choice of this edition or unmodified upstream, a floating show/hide window, playback controls, a vertical volume slider and an Up Next list.
 
-## Features
+## Build it yourself
 
-- **Multi-category search** — songs, albums, artists, and playlists in a 4-pane
-  grid, with `#songs:`-style category filters
-- **Home view** with personalized recommendations
-- **Playlist browsing** — drill into playlists, queue from any track
-- **3-pane library** — Playlists, Albums, and Artists tabs (Tab to cycle)
-- **Album and Artist views** — dedicated detail pages
-- **Queue management** with shuffle and repeat
-- **Radio** — start a YouTube Music radio from any track (`R`)
-- **Likes** — like/unlike tracks without leaving the terminal (`f`)
-- **Recently played** — your listening history as a page (`H`)
-- **Lyrics page** (`L` key)
-- **MPRIS2 integration** — playerctl / waybar / KDE Connect control and metadata
-- **Navigation history** — Esc goes back through visited pages
-- **Action popup** (`.` key) — context actions for the selected track/playlist/album
-- **Filter bar** (`/` key) — live-filter the current list without leaving the view
-- **Custom keymaps** via `~/.config/ytmusic-tui/keymap.toml`, including two-key
-  sequences (`g s` for search page)
-- **Responsive layout** — adapts orientation based on terminal size
-- **mpv-based audio backend** (plays YouTube URLs directly via ytdl-hook)
-- **Vim-style keybindings** (spotify_player-compatible defaults, fully remappable)
-- **TOML configuration** (`~/.config/ytmusic-tui/config.toml`)
-- **Theme system** with four built-in palettes: synthwave, nord, gruvbox, catppuccin
-- **Theme switcher** (`T` key) — change themes on the fly
-- **Player bar** with progress, volume, and now-playing info
+You need a stable Rust toolchain, a C toolchain/pkg-config, libmpv and yt-dlp. On Arch/Omarchy:
 
-## Screenshots
-
-| | |
-|---|---|
-| ![Search: 4-pane results grid](screenshots/out/search.png) | ![Library: 3-pane layout](screenshots/out/library.png) |
-| *Search — songs, albums, artists, playlists* | *Library — playlists, albums, artists* |
-| ![Queue view](screenshots/out/queue.png) | ![Action popup](screenshots/out/popup.png) |
-| *Queue with current-track marker* | *Action popup (`.`) — context actions* |
-
-The player bar (now playing, progress, shuffle/repeat, volume) is visible at
-the bottom of every view.
-
-## Requirements
-
-- [libmpv2](https://mpv.io/) — the shared library `libmpv.so.2` must be on the
-  system library path.
-  - Arch Linux: `sudo pacman -S mpv` (includes `libmpv.so.2`)
-  - Debian/Ubuntu: `sudo apt install libmpv2`
-- [yt-dlp](https://github.com/yt-dlp/yt-dlp) — mpv's ytdl-hook uses it to
-  resolve YouTube stream URLs. Keep it up to date: YouTube rotates its
-  JavaScript challenge periodically, and an outdated yt-dlp silently fails to
-  play anything (keep at least version 2026.6.9 or newer).
-
-## Installation
-
-```bash
-# Install system dependencies (Arch Linux)
-sudo pacman -S mpv yt-dlp
-
-# Install from crates.io
-cargo install ytmusic-tui
-```
-
-Or build from source:
-
-```bash
-git clone https://github.com/WakaTaira/ytmusic-tui.git
+```sh
+omarchy pkg add rustup base-devel mpv yt-dlp
+rustup toolchain install stable
+git clone --branch omarchy https://github.com/lisim/ytmusic-tui.git
 cd ytmusic-tui
-cargo build --release
-cp target/release/ytmusic-tui ~/.local/bin/
+cargo build --release --locked -p ytmusic-tui
 ```
 
-### Authenticate with YouTube Music
+Run `target/release/ytmusic-tui auth --from-browser chrome` (replace `chrome` with your browser), then `target/release/ytmusic-tui`. Manual sign-in is available with `target/release/ytmusic-tui auth`.
 
-Authentication is cookie-based — `ytmusic-tui` reads cookies from your browser
-and writes them to `~/.config/ytmusic-tui/browser.json`.
+By default it uses `~/.config/ytmusic-tui/`. Set **`YTMUSIC_TUI_CONFIG_DIR`** to a separate directory to isolate configuration, keymaps and browser authentication from another installation. The companion plugin does this automatically for this edition. Existing explicit `browser_auth_path` overrides remain supported.
 
-**Easiest: auto-extract from your signed-in browser**
-
-```bash
-ytmusic-tui auth --from-browser firefox
-```
-
-Supported browsers (via [rookie](https://crates.io/crates/rookie)):
-`firefox`, `librewolf`, `chrome`, `chromium`, `brave`, `edge`, `vivaldi`,
-`opera`, `opera_gx`, `arc`, `safari` (macOS only).
-
-You must already be signed in to [music.youtube.com](https://music.youtube.com)
-in that browser. The command validates the extracted session against the live
-API **before** writing `browser.json`, so a failed extraction never clobbers
-an existing file.
-
-> **Zen Browser:** rookie 0.5.6 does not detect Zen's cookie store yet —
-> Zen keeps cookies at `~/.config/zen/<profile>/cookies.sqlite` rather than
-> Firefox's path. Use the manual paste fallback below until [issue #25](https://github.com/WakaTaira/ytmusic-tui/issues/25)
-> ships a Zen-aware loader.
-
-**Fallback: paste request headers**
-
-```bash
-ytmusic-tui auth
-```
-
-1. Open [music.youtube.com](https://music.youtube.com) and sign in.
-2. Open DevTools → Network → reload the page → pick any `browse` request.
-3. Right-click the request → Copy → Copy as cURL.
-4. Paste the headers when prompted.
-
-The command parses the headers (case-insensitive, CRLF-safe), validates that
-`SAPISID` is present, and writes `~/.config/ytmusic-tui/browser.json` at
-mode `0600`.
-
-Cookies expire after a while. If your library suddenly shows up empty,
-re-run either command above.
-
-> **OAuth?** Broken upstream (ytmusicapi issue #813). Browser cookie auth is
-> the only working method right now.
-
-> **Legacy:** the previous `ytmusicapi browser` Python flow still works (the
-> `browser.json` format is identical), but is no longer required — you don't
-> need Python in the install path anymore.
-
-## Usage
-
-```bash
-ytmusic-tui
-```
-
-If a `browser.json` is missing or invalid, the player still starts and shows a
-session warning on the status line. Use the auth commands above to create one,
-then restart.
-
-## Keybindings
-
-| Key                            | Action                             |
-|--------------------------------|------------------------------------|
-| `j` / `k` (or `↓` / `↑`)      | Navigate rows down / up            |
-| `Enter`                        | Play / Select                      |
-| `Space`                        | Play / Pause                       |
-| `n` / `p`                      | Next / Previous                    |
-| `>` / `<`                      | Seek +5 s / -5 s                   |
-| `^`                            | Seek to start                      |
-| `_`                            | Mute toggle                        |
-| `b`                            | Cycle audio quality (low/normal/high) |
-| `f`                            | Like / unlike current track        |
-| `R`                            | Start radio from current track     |
-| `H`                            | Recently played (history)          |
-| `/`                            | Filter current list                |
-| `.`                            | Action popup (context menu)        |
-| `T`                            | Theme switcher                     |
-| `Tab`                          | Cycle panes (search / library)     |
-| `g`                            | Home                               |
-| `l`                            | Library                            |
-| `q`                            | Queue view                         |
-| `L`                            | Lyrics                             |
-| `a`                            | Go to current track's artist       |
-| `A`                            | Go to current track's album        |
-| `s`                            | Shuffle toggle                     |
-| `r`                            | Repeat toggle                      |
-| `+` / `-`                      | Volume up / down                   |
-| `d`                            | Remove from queue                  |
-| `Esc`                          | Back (navigation history)          |
-| `Q`                            | Quit                               |
-
-All keybindings can be remapped via `keymap.toml` (see Configuration).
-
-### Unbound actions
-
-Some actions ship without a default key but can be assigned in `keymap.toml`:
-
-- **`search_page`** — jump to the search view and focus its input box. The
-  spotify_player default for this is the two-key sequence `g s`, which this
-  binary supports natively (unlike the Python version). It ships with `g s`
-  pre-wired; you can rebind it to a single key if you prefer:
-
-  ```toml
-  [keybinds]
-  search_page = "ctrl+s"
-  ```
-
-### Keymap behavior notes
-
-- **Typo'd action names** are silently ignored (forward compatibility: new
-  action names added in future versions will not break existing keymap files).
-- **Typo'd key strings** (unparseable key syntax) are surfaced as a one-line
-  warning on the status line once at startup, then silently dropped. Fix the
-  typo and restart to clear the warning.
-
-## Configuration
-
-### config.toml
+For terminal colours, put this in the selected directory’s `config.toml`:
 
 ```toml
-# ~/.config/ytmusic-tui/config.toml
-
-[auth]
-browser_auth_path = "~/.config/ytmusic-tui/browser.json"
-
-[player]
-volume = 80
-audio_quality = "high"  # low / normal / high
-
 [ui]
-theme = "synthwave"  # synthwave / nord / gruvbox / catppuccin
+theme = "terminal"
 ```
 
-### keymap.toml
+`NO_COLOR` disables terminal colours. The companion launcher clears it for this interactive player.
 
-Override any keybinding by creating or editing the user keymap file:
+## Essential keys
 
-```bash
-# Copy the shipped defaults as a starting point
-cp config/default_keymap.toml ~/.config/ytmusic-tui/keymap.toml
-# (The config/ directory is at the repo root alongside the Cargo workspace)
+| Key | Action |
+| --- | --- |
+| 1 / 2 / 3 / 5 / 8 | Home / Search / Library / Queue / Lyrics |
+| Tab / Shift+Tab | Next / previous card or pane |
+| Up / Down, Enter | Select and play/open |
+| Space, n / p, + / - | Pause, next/previous, volume |
+| Esc, F1, Q | Back or leave search input, helper, quit |
+
+After submitting a search with Enter, press Esc to browse its results. Mouse selection is not supported. Closing the terminal quits playback; the companion plugin’s hide action keeps it running.
+
+## Limits and validation
+
+Home loads at most ten pages. Personal `RDTMAK` mixes load the initial batch (typically 100 songs); regular playlists retain full pagination. Desktop Up Next publishes at most 100 upcoming songs, respecting shuffle and repeat. Helper labels assume the default keymap.
+
+```sh
+cargo test --release --locked --workspace
+cargo fmt --all --check
+cargo clippy --release --all-targets --locked -- -D warnings
 ```
 
-```toml
-# ~/.config/ytmusic-tui/keymap.toml
-# List only the bindings you want to change.
+This repository distributes source, not prebuilt players. See [DEPENDENCIES.md](DEPENDENCIES.md) before redistributing binaries. [Upstream documentation](README_UPSTREAM.md) describes the original player; some behaviour differs in this edition.
 
-[keybinds]
-toggle_pause   = "space"
-next_track     = "n"
-previous_track = "p"
-search_page    = "g s"    # two-key sequence; supported natively
-# Key names follow the Python/Textual convention (see default_keymap.toml for all actions)
-```
+## Licence and credit
 
-The config format is identical to the Python version's `keymap.toml`, so
-existing files work unchanged.
-
-### Themes
-
-| Theme      | Description                           |
-|------------|---------------------------------------|
-| synthwave  | Magenta/cyan/purple on dark (default) |
-| nord       | Blue/teal accent on dark gray         |
-| gruvbox    | Orange/yellow on dark brown           |
-| catppuccin | Lavender/pink on dark                 |
-
-| | |
-|---|---|
-| ![synthwave](screenshots/out/home-synthwave.png) | ![nord](screenshots/out/home-nord.png) |
-| *synthwave* | *nord* |
-| ![gruvbox](screenshots/out/home-gruvbox.png) | ![catppuccin](screenshots/out/home-catppuccin.png) |
-| *gruvbox* | *catppuccin* |
-
-Screenshots are regenerated with `./screenshots/generate.sh` (requires
-[vhs](https://github.com/charmbracelet/vhs); on Arch: `sudo pacman -S vhs ttyd`).
-The script drives the binary in a built-in demo mode (`YTMUSIC_TUI_DEMO=1`)
-with a fictional catalog, so output is deterministic and contains no account
-data.
-
-## MPRIS2 / waybar / playerctl
-
-The player registers itself on the session D-Bus as
-`org.mpris.MediaPlayer2.ytmusic-tui`. Commands via `playerctl` just work:
-
-```bash
-playerctl --player ytmusic-tui play-pause
-playerctl --player ytmusic-tui next
-playerctl --player ytmusic-tui metadata
-```
-
-**waybar position counter freezes.** This is a waybar client-side behavior, not
-a player bug. The MPRIS spec says compliant players must not spam the `Position`
-property via `PropertiesChanged` signals — ytmusic-tui follows the spec.
-waybar's mpris module renders event-driven by default and so does not
-auto-refresh position. Fix this by adding `"interval": 1` to the mpris module
-in your waybar config:
-
-```jsonc
-// ~/.config/waybar/config.jsonc
-"mpris": {
-    "interval": 1,
-    ...
-}
-```
-
-## Architecture
-
-```
-.
-├── ytmusic-api/         # Library crate: InnerTube transport + auth + domain models
-│   src/
-│   ├── lib.rs           # Public API re-exports (InnerTubeClient, BrowserAuth, Track, ...)
-│   ├── auth.rs          # Browser-header auth + SAPISIDHASH generation
-│   ├── client.rs        # InnerTubeClient: HTTP requests, session canary
-│   ├── classify.rs      # classify_api_error: error taxonomy (auth / not-found / network / ...)
-│   ├── endpoints/       # One file per API surface (home, search, album, artist, ...)
-│   ├── models.rs        # Domain types: Track, AlbumInfo, ArtistInfo, PlaylistInfo, ...
-│   └── parse.rs / nav.rs / context.rs  # InnerTube response navigation helpers
-│
-└── ytmusic-tui/         # Binary + lib crate: UI, player, queue, keymap, config
-    src/
-    ├── main.rs          # Binary entry: config loading, terminal setup, render/input loop
-    ├── lib.rs           # Crate module root
-    ├── app/mod.rs       # AppCommand/AppEvent channels, spawn_runtime (tokio + forwarder threads)
-    ├── player.rs        # libmpv-rs wrapper: play, seek, volume, mute, PlayerEvent stream
-    ├── queue.rs         # QueueManager: shuffle, repeat, track list
-    ├── config.rs        # TOML config loading, theme definitions, keymap loading
-    ├── keymap.rs        # Keymap dispatcher: key→Action, two-key sequence support
-    ├── navigation.rs    # NavigationManager: page-stack history (Esc goes back)
-    ├── layout.rs        # Responsive orientation detection (aspect ratio 2.3 threshold)
-    ├── formatting.rs    # Duration formatting helpers
-    ├── mpris/           # MPRIS2 server (mpris-server 0.10 on the tokio runtime)
-    └── views/           # One module per page + popup + filter bar (ratatui widgets)
-```
-
-The binary runs two extra threads beyond the main render thread:
-
-1. **Runtime thread** — a `std::thread` hosting a `tokio::Runtime`. Owns the
-   `InnerTubeClient`, `QueueManager`, `Player`, and (M6) the MPRIS server. All
-   async API calls and playback commands land here via a `tokio::sync::mpsc`
-   unbounded channel.
-2. **Forwarder thread** — a `std::thread` that blocks on mpv's `PlayerEvent`
-   receiver and re-publishes each event as an `AppEvent` onto the UI's
-   `std::sync::mpsc` channel. A second sink will be added for MPRIS metadata
-   updates without changing the forwarder's shape (YAGNI until a second
-   consumer exists).
-
-The main thread's ratatui render loop is fully synchronous and never blocks.
-
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and guidelines.
-
-## License
-
-[MIT](LICENSE)
+[MIT](LICENSE), copyright © 2026 WakaTaira. Keep the original copyright and licence notice when redistributing. Fork changes are maintained by [lisim](https://github.com/lisim); this project is not affiliated with Google or YouTube.

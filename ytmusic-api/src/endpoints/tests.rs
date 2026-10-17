@@ -406,6 +406,19 @@ fn playlist_tracks_walks_continuations_across_pages() {
 }
 
 #[test]
+fn personal_mix_does_not_eagerly_fetch_an_endless_recommendation_feed() {
+    for id in ["RDTMAK5personal", "VLRDTMAK5personal"] {
+        let client = SequencePost::new(vec![make_initial_playlist_page(
+            &["song1", "song2"],
+            Some("MORE_MIX"),
+        )]);
+        let tracks = block_on(get_playlist_tracks(&client, id)).expect("initial mix batch");
+        assert_eq!(tracks.len(), 2);
+        assert_eq!(client.calls().len(), 1);
+    }
+}
+
+#[test]
 fn playlist_tracks_walks_three_pages() {
     // Three-page chain: page 1 → token A → page 2 → token B → page 3 (no token).
     let page1 = make_initial_playlist_page(&["a1", "a2"], Some("TOKEN_A"));
@@ -1167,7 +1180,10 @@ fn history_flattens_dated_shelves() {
 
 #[test]
 fn home_returns_mixed_sections() {
-    let client = FakePost::new(fixture("home.json"));
+    let mut response = fixture("home.json");
+    response.pointer_mut("/contents/singleColumnBrowseResultsRenderer/tabs/0/tabRenderer/content/sectionListRenderer")
+        .unwrap().as_object_mut().unwrap().remove("continuations");
+    let client = FakePost::new(response);
     let sections = block_on(get_home(&client)).expect("home ok");
 
     // Ground truth (api.py over home.json): 2 carousels — a song carousel
@@ -1209,6 +1225,34 @@ fn home_returns_mixed_sections() {
     let (endpoint, body) = client.last();
     assert_eq!(endpoint, "browse");
     assert_eq!(body["browseId"], "FEmusic_home");
+}
+
+#[test]
+fn home_loads_personal_mix_from_second_page_and_stops_repeated_token() {
+    let mut initial = fixture("home.json");
+    initial.pointer_mut("/contents/singleColumnBrowseResultsRenderer/tabs/0/tabRenderer/content/sectionListRenderer")
+        .unwrap()["continuations"] = serde_json::json!([{"nextContinuationData":{"continuation":"HOME_NEXT"}}]);
+    let next = serde_json::json!({"continuationContents":{"sectionListContinuation":{
+        "contents":[{"musicCarouselShelfRenderer":{
+            "header":{"musicCarouselShelfBasicHeaderRenderer":{"title":{"runs":[{"text":"Mixed for you"}]}}},
+            "contents":[{"musicTwoRowItemRenderer":{
+                "title":{"runs":[{"text":"My Supermix"}]},
+                "navigationEndpoint":{"watchPlaylistEndpoint":{"playlistId":"RDpersonal"}}
+            }}]
+        }}],
+        "continuations":[{"nextContinuationData":{"continuation":"HOME_NEXT"}}]
+    }}});
+    let client = SequencePost::new(vec![initial, next]);
+    let sections = block_on(get_home(&client)).expect("home pages");
+    let mixes = sections
+        .iter()
+        .find(|s| s.title == "Mixed for you")
+        .expect("missing personal mixes");
+    assert!(
+        matches!(&mixes.items[0], HomeSectionItem::Playlist(p) if p.title == "My Supermix" && p.playlist_id == "RDpersonal")
+    );
+    assert_eq!(client.calls().len(), 2);
+    assert_eq!(client.calls()[1].1["continuation"], "HOME_NEXT");
 }
 
 // ---------------------------------------------------------------------------

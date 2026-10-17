@@ -739,7 +739,7 @@ fn push_mpris_state(mpris: Option<&MprisHandle>, queue: &QueueManager, player: &
         return;
     };
     let player_state = player.get_state();
-    let snapshot = match queue.current_track() {
+    let mut snapshot = match queue.current_track() {
         Some(track) => MprisState::from_now_playing(
             player_state.is_playing,
             track.video_id.clone(),
@@ -767,6 +767,15 @@ fn push_mpris_state(mpris: Option<&MprisHandle>, queue: &QueueManager, player: &
             0.0,
         ),
     };
+    // shortcut: publish the next 100 songs; use TrackList if a full remote queue is needed.
+    snapshot.up_next_json = serde_json::Value::Array(
+        queue
+            .upcoming_tracks()
+            .take(100)
+            .map(|track| serde_json::json!({"title": track.title, "artist": track.artist}))
+            .collect(),
+    )
+    .to_string();
     handle.send(snapshot);
 }
 

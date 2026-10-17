@@ -664,6 +664,7 @@ struct AppModel {
     /// Esc leaves input focus (mirrors Textual's `Input` swallowing keys). Only
     /// meaningful while [`View::Search`] is active.
     input_mode: bool,
+    show_shortcuts: bool,
     theme: Theme,
     should_quit: bool,
 }
@@ -733,6 +734,7 @@ impl AppModel {
             toasts: ToastManager::new(),
             view: View::Home,
             input_mode: false,
+            show_shortcuts: true,
             theme,
             should_quit: false,
         }
@@ -954,6 +956,10 @@ impl AppModel {
     /// decision lives in one tested place (Textual achieved the same by letting
     /// the focused `Input` widget swallow keys before the app bindings ran).
     fn dispatch_key(&mut self, key: KeyEvent, runtime: &RuntimeHandle) {
+        if key.code == KeyCode::F(1) {
+            self.show_shortcuts = !self.show_shortcuts;
+            return;
+        }
         if self.is_input_active() {
             self.handle_input_key(key, runtime);
             return;
@@ -1218,6 +1224,7 @@ impl AppModel {
         let names: Vec<String> = config::themes().keys().map(|k| (*k).to_owned()).collect();
         // Sort for a stable, predictable order (HashMap iteration is arbitrary).
         let mut names = names;
+        names.push("terminal".to_owned());
         names.sort();
         self.popups = PopupState::Theme(ThemePopup::new(names, &self.theme_name));
     }
@@ -2147,6 +2154,86 @@ impl AppModel {
         }
     }
 
+    fn shortcut_lines(&self, width: u16) -> Vec<Line<'static>> {
+        if !self.show_shortcuts {
+            return Vec::new();
+        }
+        // shortcut: labels match this install's default bindings; derive them if custom keymaps are added.
+        let rows: &[&[(&str, &str)]] = if self.is_input_active() {
+            &[&[
+                ("Type", "query"),
+                ("Enter", "Search"),
+                ("Esc", "Results"),
+                ("F1", "Hide help"),
+            ]]
+        } else if self.popups.is_open() {
+            &[&[
+                ("↑↓", "Move"),
+                ("Enter", "Choose"),
+                ("Esc", "Close"),
+                ("F1", "Hide help"),
+            ]]
+        } else if self.filter.is_active() {
+            &[&[
+                ("Type", "filter"),
+                ("↑↓", "Move"),
+                ("Enter", "Play"),
+                ("Esc", "Clear"),
+                ("F1", "Hide help"),
+            ]]
+        } else {
+            &[
+                &[
+                    ("↑↓", "Move"),
+                    ("Tab", "Pane"),
+                    ("Enter", "Play/open"),
+                    ("Esc", "Back"),
+                    ("F1", "Hide help"),
+                ],
+                &[
+                    ("1", "Home"),
+                    ("2", "Search"),
+                    ("3", "Library"),
+                    ("5", "Queue"),
+                    ("8", "Lyrics"),
+                ],
+                &[
+                    ("Space", "Pause"),
+                    ("n/p", "Skip"),
+                    ("+/-", "Volume"),
+                    (".", "Actions"),
+                    ("Q", "Quit"),
+                ],
+            ]
+        };
+        let mut lines = Vec::new();
+        for row in rows {
+            let mut line = Line::default();
+            for &(key, label) in *row {
+                let key_span = Span::styled(
+                    key,
+                    Style::default()
+                        .fg(self.theme.accent)
+                        .add_modifier(Modifier::BOLD),
+                );
+                let label_span =
+                    Span::styled(format!(" {label}"), Style::default().fg(self.theme.text));
+                if !line.spans.is_empty()
+                    && line.width() + 3 + key_span.width() + label_span.width() > usize::from(width)
+                {
+                    lines.push(line);
+                    line = Line::default();
+                }
+                if !line.spans.is_empty() {
+                    line.spans.push(Span::raw(" · "));
+                }
+                line.spans.extend([key_span, label_span]);
+            }
+            lines.push(line);
+        }
+        lines
+    }
+
     /// Draw the whole UI: the theme-filled background, the optional pending-key
     /// header line, the content, the optional in-page filter bar, the docked
     /// player bar, any popup overlay, and finally the floating toasts.
@@ -2170,11 +2257,18 @@ impl AppModel {
         } else {
             0
         };
+        let mut shortcuts = self.shortcut_lines(area.width);
+        // Keep enough content height for error toasts in small terminals.
+        shortcuts
+            .truncate(usize::from(area.height.saturating_sub(
+                header_lines + filter_rows + PLAYER_BAR_HEIGHT + 7,
+            )));
         let chunks = Layout::vertical([
             Constraint::Length(header_lines),
             Constraint::Min(1),
             Constraint::Length(filter_rows),
             Constraint::Length(PLAYER_BAR_HEIGHT),
+            Constraint::Length(shortcuts.len() as u16),
         ])
         .split(area);
 
@@ -2198,6 +2292,7 @@ impl AppModel {
                 .render(frame, chunks[2], &self.theme, visible, total);
         }
         PlayerBar.render(frame, chunks[3], &self.player, &self.theme);
+        frame.render_widget(Paragraph::new(shortcuts), chunks[4]);
 
         // The popup overlay is drawn last so it floats over everything, centered
         // on the content area (above the player bar).
@@ -2253,6 +2348,13 @@ impl AppModel {
         )))
         .alignment(Alignment::Center);
         frame.render_widget(title_para, area);
+
+        if !self.show_shortcuts {
+            frame.render_widget(
+                Paragraph::new("F1 shortcuts").style(Style::default().fg(self.theme.accent)),
+                area,
+            );
+        }
 
         // Right-aligned pending key-sequence hint (replaces the old extra row).
         if let Some(prefix) = self.keymap.pending_label() {
@@ -4100,6 +4202,35 @@ mod tests {
 
     // -- rendering (TestBackend) -------------------------------------------
 
+    #[test]
+    fn shortcut_helper_renders_and_f1_toggles_while_searching() {
+        let (runtime, _rx) = RuntimeHandle::stub();
+        let mut model = AppModel::new(Theme::from_name("terminal"));
+        let text = render_model(&model, 80, 24);
+        assert!(text.contains("2 Search") && text.contains("Enter Play/open"));
+        assert!(text.contains("Vol: 80"));
+        model.dispatch_key(key(KeyCode::Char('2')), &runtime);
+        model.dispatch_key(key(KeyCode::Char('a')), &runtime);
+        let text = render_model(&model, 80, 24);
+        assert!(text.contains("Enter Search") && !text.contains("Space Pause"));
+        model.dispatch_key(key(KeyCode::F(1)), &runtime);
+        let text = render_model(&model, 80, 24);
+        assert!(text.contains("F1 shortcuts") && !text.contains("Enter Search"));
+        assert_eq!(model.search.input(), "a");
+        model.dispatch_key(key(KeyCode::F(1)), &runtime);
+        assert!(render_model(&model, 80, 24).contains("Enter Search"));
+    }
+
+    #[test]
+    fn shortcut_helper_wraps_without_losing_keys() {
+        let model = AppModel::new(Theme::default());
+        let lines = model.shortcut_lines(40);
+        assert!(lines.len() > 3);
+        assert!(lines.iter().all(|line| line.width() <= 40));
+        let text = render_model(&model, 40, 24);
+        assert!(text.contains("F1 Hide help") && text.contains("Q Quit"));
+    }
+
     /// Flatten a TestBackend buffer into one string for substring assertions.
     fn render_model(model: &AppModel, w: u16, h: u16) -> String {
         let backend = TestBackend::new(w, h);
@@ -4156,10 +4287,7 @@ mod tests {
     }
 
     #[test]
-    fn render_draws_a_borderless_section_with_accent_title() {
-        // A loaded home view draws each section as a borderless DataTable with
-        // an accent-colored section title above it (NOT a bordered panel — the
-        // SVG draws no box glyphs).
+    fn render_draws_a_section_card_with_accent_title() {
         let mut model = AppModel::new(Theme::default());
         fold(&mut model, AppEvent::HomeLoaded(vec![track_section()]));
         let backend = TestBackend::new(70, 20);
@@ -4167,18 +4295,8 @@ mod tests {
         terminal.draw(|frame| model.render(frame)).unwrap();
         let theme = Theme::default();
         let buffer = terminal.backend().buffer();
-        // No box-drawing glyphs in the content area (rows 1..content_end).
-        // (The player bar's top divider lives on its own row and uses `─`; we
-        // restrict the scan to the home content rows above it.)
-        for y in 1..16u16 {
-            for x in 0..70u16 {
-                let s = buffer[(x, y)].symbol();
-                assert!(
-                    !"┌┐└┘│".contains(s),
-                    "home content drew a box glyph {s:?} at ({x},{y})"
-                );
-            }
-        }
+        assert_eq!(buffer[(0, 1)].symbol(), "┌");
+        assert_eq!(buffer[(0, 1)].fg, theme.accent);
         // The section title 'Q' (of "Quick picks") is drawn in the accent color.
         let has_accent_title = buffer
             .content()

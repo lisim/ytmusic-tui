@@ -156,7 +156,12 @@ pub(crate) async fn get_playlist_tracks(
         .post_request("browse", json!({ "browseId": browse_id }))
         .await?;
     let mut raw_tracks = playlist::parse_playlist_tracks(&response);
-    let mut next_token = playlist::parse_continuation_token(&response);
+    // shortcut: personal mixes use the first batch (~100 songs); add on-demand paging if needed.
+    let mut next_token = if browse_id.starts_with("VLRDTMAK") {
+        None
+    } else {
+        playlist::parse_continuation_token(&response)
+    };
 
     // Pages 2..N: each carries the next shelf chunk + (optionally) the next
     // token. Stop when no token is returned or the defensive bound is hit.
@@ -311,10 +316,24 @@ pub(crate) async fn get_library_artists(
 /// then convert via `parse::parse_home_sections` (which routes each item to a
 /// [`Track`] or [`PlaylistInfo`] by its `videoId`/`playlistId`/`browseId` shape).
 pub(crate) async fn get_home(client: &impl PostRequest) -> Result<Vec<HomeSection>, ApiError> {
-    let response = client
+    let mut response = client
         .post_request("browse", json!({ "browseId": "FEmusic_home" }))
         .await?;
-    let raw_sections = home::parse_home(&response);
+    let mut raw_sections = home::parse_home(&response);
+    let mut seen = std::collections::HashSet::new();
+    // shortcut: cap Home at ten pages; add incremental loading if more is needed.
+    for _ in 1..10 {
+        let Some(token) = home::continuation_token(&response) else {
+            break;
+        };
+        if !seen.insert(token.to_owned()) {
+            break;
+        }
+        response = client
+            .post_request("browse", json!({"continuation": token}))
+            .await?;
+        raw_sections.extend(home::parse_home(&response));
+    }
     Ok(parse::parse_home_sections(&raw_sections))
 }
 

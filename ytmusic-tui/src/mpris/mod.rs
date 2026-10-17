@@ -90,6 +90,7 @@ pub enum MprisControl {
     Previous,
     /// `Stop`.
     Stop,
+    SetVolume(i64),
 }
 
 /// Map an inbound [`MprisControl`] to the runtime [`AppCommand`] it triggers.
@@ -105,6 +106,7 @@ pub fn control_to_command(control: MprisControl) -> AppCommand {
         MprisControl::PlayPause | MprisControl::Stop => AppCommand::TogglePause,
         MprisControl::Next => AppCommand::NextTrack,
         MprisControl::Previous => AppCommand::PreviousTrack,
+        MprisControl::SetVolume(volume) => AppCommand::SetVolume(volume),
     }
 }
 
@@ -157,6 +159,8 @@ pub struct MprisState {
     /// `Position` in microseconds — a getter only, NEVER emitted through
     /// `PropertiesChanged` (the crate forbids it; the waybar lesson).
     pub position_micros: i64,
+    /// JSON titles/artists for the Omarchy now-playing panel.
+    pub up_next_json: String,
 }
 
 impl Default for MprisState {
@@ -173,6 +177,7 @@ impl Default for MprisState {
             loop_status: LoopStatus::None,
             shuffle: false,
             position_micros: 0,
+            up_next_json: String::new(),
         }
     }
 }
@@ -230,6 +235,7 @@ impl MprisState {
             loop_status: repeat_to_loop_status(repeat),
             shuffle,
             position_micros: seconds_to_micros(position_seconds),
+            up_next_json: String::new(),
         }
     }
 }
@@ -658,6 +664,33 @@ mod tests {
         new.title = "Song 2".to_owned();
         let changed = changed_properties(&old, &new);
         assert!(changed.iter().any(|p| matches!(p, Property::Metadata(_))));
+    }
+
+    #[tokio::test]
+    async fn volume_writes_reach_player_and_validate_input() {
+        use mpris_server::PlayerInterface;
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let player = YtmusicPlayer::new(Arc::new(Mutex::new(MprisState::default())), tx);
+        for (input, expected) in [(0.45, 45), (-1.0, 0), (2.0, 100)] {
+            player.set_volume(input).await.unwrap();
+            assert!(
+                matches!(control_to_command(rx.try_recv().unwrap()), AppCommand::SetVolume(v) if v == expected)
+            );
+        }
+        assert!(player.set_volume(f64::NAN).await.is_err());
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn queue_change_emits_metadata_without_changing_current_track() {
+        let old = playing_state();
+        let mut new = old.clone();
+        new.up_next_json = r#"[{"title":"Next song","artist":"Artist"}]"#.into();
+        let changed = changed_properties(&old, &new);
+        assert_eq!(changed.len(), 1);
+        assert!(
+            matches!(&changed[0], Property::Metadata(m) if m.get_value("ytmusic:upNext").is_some())
+        );
     }
 
     #[test]

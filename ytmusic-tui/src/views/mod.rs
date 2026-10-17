@@ -352,6 +352,23 @@ impl Theme {
     /// this only guards a future hand-edited palette).
     #[must_use]
     pub fn from_name(name: &str) -> Self {
+        if name == "terminal" {
+            // ANSI colours follow the terminal's palette when Omarchy changes theme.
+            return Self {
+                primary: Color::Magenta,
+                secondary: Color::Cyan,
+                accent: Color::Blue,
+                background: Color::Reset,
+                surface: Color::Reset,
+                primary_background: Color::DarkGray,
+                text: Color::Reset,
+                text_muted: Color::DarkGray,
+                panel_bg: Color::Reset,
+                header_bg: Color::Black,
+                row_bg: Color::Reset,
+                dim_cursor: Color::DarkGray,
+            };
+        }
         Self::from_palette(&get_theme_palette(name))
     }
 
@@ -506,6 +523,27 @@ mod tests {
         let unknown = Theme::from_name("does-not-exist");
         let synthwave = Theme::from_name("synthwave");
         assert_eq!(unknown, synthwave);
+    }
+
+    #[test]
+    fn terminal_theme_leaves_colours_to_the_terminal() {
+        let theme = Theme::from_name("terminal");
+        assert_eq!(theme.background, Color::Reset);
+        assert_eq!(theme.text, Color::Reset);
+        for colour in [
+            theme.primary,
+            theme.secondary,
+            theme.accent,
+            theme.surface,
+            theme.primary_background,
+            theme.text_muted,
+            theme.panel_bg,
+            theme.header_bg,
+            theme.row_bg,
+            theme.dim_cursor,
+        ] {
+            assert!(!matches!(colour, Color::Rgb(..)));
+        }
     }
 
     #[test]

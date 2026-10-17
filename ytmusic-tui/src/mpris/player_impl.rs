@@ -89,6 +89,9 @@ impl YtmusicPlayer {
 pub(super) fn build_metadata(state: &MprisState) -> Metadata {
     let mut m = Metadata::new();
     m.set_trackid(Some(youtube_trackid(&state.video_id)));
+    if !state.up_next_json.is_empty() {
+        m.set("ytmusic:upNext", Some(state.up_next_json.clone()));
+    }
     if state.video_id.is_empty() {
         return m;
     }
@@ -228,8 +231,15 @@ impl PlayerInterface for YtmusicPlayer {
     async fn volume(&self) -> fdo::Result<Volume> {
         Ok(self.state.lock().await.volume)
     }
-    async fn set_volume(&self, _volume: Volume) -> mpris_server::zbus::Result<()> {
-        // Python exposes Volume read-only (no setter); accept-and-ignore.
+    async fn set_volume(&self, volume: Volume) -> mpris_server::zbus::Result<()> {
+        if !volume.is_finite() {
+            return Err(mpris_server::zbus::Error::Failure(
+                "Volume must be finite".into(),
+            ));
+        }
+        self.relay(MprisControl::SetVolume(
+            (volume.clamp(0.0, 1.0) * 100.0).round() as i64,
+        ));
         Ok(())
     }
     async fn position(&self) -> fdo::Result<Time> {
