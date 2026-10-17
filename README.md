@@ -13,6 +13,7 @@ This is **lisim’s customised fork** of [WakaTaira/ytmusic-tui](https://github.
 - **Terminal colours:** choose `theme = "terminal"` to use your terminal palette.
 - **Personal mixes:** later Home sections load, including Mixed for you. Personal mixes open promptly with their first batch of songs.
 - **Desktop controls:** working MPRIS volume changes and upcoming-track metadata for the companion plugin.
+- **Start from Play:** `ytmusic-tui --autoplay` plays the first available song from Home once recommendations load. Normal launches stay silent; keyboard input or a sign-in/API error cancels pending autoplay.
 
 It also retains the YouTube session timestamp cookies needed by some accounts when signing in from a browser, and creates authentication files with owner-only permissions.
 

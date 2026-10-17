@@ -94,7 +94,7 @@ fn main() {
     // Phase 1: everything that can fail with a clean message happens before the
     // terminal is touched. `run` returns an exit code; non-zero on a fatal
     // setup error (already reported to stderr).
-    std::process::exit(run());
+    std::process::exit(run(argv.iter().any(|arg| arg == "--autoplay")));
 }
 
 /// Resolve the `auth` subcommand off the argv vector.
@@ -172,7 +172,7 @@ fn print_auth_usage<W: Write>(out: &mut W) {
 /// Returns a process exit code: `0` on a clean quit, `1` on a fatal setup or
 /// terminal error. All error paths print a single human-readable line to
 /// stderr; none panic.
-fn run() -> i32 {
+fn run(autoplay: bool) -> i32 {
     let config = match config::load_config(None, None) {
         Ok(c) => c,
         Err(e) => {
@@ -231,7 +231,7 @@ fn run() -> i32 {
     runtime.send(AppCommand::CheckSession);
 
     // Phase 2: terminal I/O. From here on, a clean teardown is mandatory.
-    let exit_code = match run_with_terminal(&config, &runtime, &event_rx) {
+    let exit_code = match run_with_terminal(&config, &runtime, &event_rx, autoplay) {
         Ok(()) => 0,
         Err(e) => {
             // The terminal is restored inside run_with_terminal's teardown even
@@ -307,13 +307,14 @@ fn run_with_terminal(
     config: &AppConfig,
     runtime: &RuntimeHandle,
     events: &std::sync::mpsc::Receiver<AppEvent>,
+    autoplay: bool,
 ) -> io::Result<()> {
     install_panic_hook();
     enable_raw_mode()?;
     // From this point the terminal is in raw mode: every exit path — including
     // an Err from the alternate-screen/terminal setup below — must restore it,
     // or the user's shell is left unusable and the error text unreadable.
-    let result = run_in_alternate_screen(config, runtime, events);
+    let result = run_in_alternate_screen(config, runtime, events, autoplay);
     restore_terminal();
     result
 }
@@ -325,6 +326,7 @@ fn run_in_alternate_screen(
     config: &AppConfig,
     runtime: &RuntimeHandle,
     events: &std::sync::mpsc::Receiver<AppEvent>,
+    autoplay: bool,
 ) -> io::Result<()> {
     let mut stdout = io::stdout();
     stdout.execute(EnterAlternateScreen)?;
@@ -333,7 +335,7 @@ fn run_in_alternate_screen(
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    run_loop(&mut terminal, config, runtime, events)
+    run_loop(&mut terminal, config, runtime, events, autoplay)
 }
 
 /// Best-effort terminal restoration: leave the alternate screen, show the
@@ -370,6 +372,7 @@ fn run_loop(
     config: &AppConfig,
     runtime: &RuntimeHandle,
     events: &std::sync::mpsc::Receiver<AppEvent>,
+    autoplay: bool,
 ) -> io::Result<()> {
     // Build the keymap dispatcher from the merged keymap.toml. A load error
     // (malformed user file) falls back to the compiled-in defaults rather than
@@ -388,6 +391,7 @@ fn run_loop(
         Err(_) => (Keymap::defaults(), Vec::new()),
     };
     let mut model = AppModel::with_keymap(Theme::from_name(&config.ui.theme), keymap);
+    model.autoplay_home = autoplay;
     model.set_theme_name(&config.ui.theme);
     // Surface dropped keymap bindings once, on the status line.
     model.set_keymap_warnings(&keymap_warnings);
@@ -609,6 +613,7 @@ fn page_type_for_view(view: View) -> &'static str {
 /// needs a `RuntimeHandle`, which tests exercise via a `None` runtime path where
 /// it only mutates view state.
 struct AppModel {
+    autoplay_home: bool,
     home: HomeView,
     playlist: PlaylistView,
     search: SearchView,
@@ -735,6 +740,7 @@ impl AppModel {
             view: View::Home,
             input_mode: false,
             show_shortcuts: true,
+            autoplay_home: false,
             theme,
             should_quit: false,
         }
@@ -775,7 +781,32 @@ impl AppModel {
     fn on_event(&mut self, event: AppEvent) -> Option<AppCommand> {
         match event {
             AppEvent::HomeLoaded(sections) => {
+                let autoplay = std::mem::take(&mut self.autoplay_home);
+                let first_track = autoplay
+                    .then(|| {
+                        sections
+                            .iter()
+                            .flat_map(|section| &section.items)
+                            .find_map(|item| match item {
+                                ytmusic_api::HomeSectionItem::Track(track)
+                                    if !track.video_id.is_empty() =>
+                                {
+                                    Some(track.clone())
+                                }
+                                _ => None,
+                            })
+                    })
+                    .flatten();
                 self.home.set_sections(sections);
+                if autoplay && self.current_video_id.is_none() {
+                    if let Some(track) = first_track {
+                        return Some(AppCommand::Play(track));
+                    }
+                    self.push_toast(
+                        "No recommended song found. Choose a song or playlist.",
+                        Severity::Info,
+                    );
+                }
             }
             AppEvent::LibraryPlaylistsLoaded(playlists) => {
                 // The library playlist list feeds three consumers: the playlist
@@ -902,6 +933,7 @@ impl AppModel {
                 self.queue_view.set_snapshot(snapshot);
             }
             AppEvent::SessionInvalid => {
+                self.autoplay_home = false;
                 // Python surfaced the signed-out canary as a 10 s warning toast
                 // (`_probe_session`, timeout=10). Mirror that here rather than a
                 // persistent header line.
@@ -928,6 +960,7 @@ impl AppModel {
     /// ever in flight from there. (M5b-2 may add a source tag if a second
     /// background fetch surface makes this ambiguous.)
     fn on_api_error(&mut self, msg: String) {
+        self.autoplay_home = false;
         if self.home.state().loaded().is_none() {
             self.home.set_error(msg.clone());
         }
@@ -956,6 +989,8 @@ impl AppModel {
     /// decision lives in one tested place (Textual achieved the same by letting
     /// the focused `Input` widget swallow keys before the app bindings ran).
     fn dispatch_key(&mut self, key: KeyEvent, runtime: &RuntimeHandle) {
+        // Manual input takes precedence over a recommendation still loading.
+        self.autoplay_home = false;
         if key.code == KeyCode::F(1) {
             self.show_shortcuts = !self.show_shortcuts;
             return;
@@ -4083,6 +4118,73 @@ mod tests {
         assert_eq!(
             home_played_id(model.home.activate_selected()),
             Some("vid1".to_owned())
+        );
+    }
+
+    #[test]
+    fn startup_autoplay_plays_first_valid_recommendation_only_once() {
+        let mut model = AppModel::new(Theme::default());
+        model.autoplay_home = true;
+        let mut section = track_section();
+        section.items.insert(
+            0,
+            HomeSectionItem::Track(Track::new("", "Unavailable", "", "", 0.0, "")),
+        );
+        let command = model.on_event(AppEvent::HomeLoaded(vec![section]));
+        assert!(matches!(command, Some(AppCommand::Play(track)) if track.video_id == "vid1"));
+        assert!(
+            model
+                .on_event(AppEvent::HomeLoaded(vec![track_section()]))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn ordinary_startup_and_existing_playback_do_not_autoplay_home() {
+        let mut model = AppModel::new(Theme::default());
+        assert!(
+            model
+                .on_event(AppEvent::HomeLoaded(vec![track_section()]))
+                .is_none()
+        );
+        model.autoplay_home = true;
+        model.current_video_id = Some("already-playing".into());
+        assert!(
+            model
+                .on_event(AppEvent::HomeLoaded(vec![track_section()]))
+                .is_none()
+        );
+        assert!(!model.autoplay_home);
+    }
+
+    #[test]
+    fn startup_autoplay_is_consumed_by_empty_home_or_auth_failure() {
+        let mut model = AppModel::new(Theme::default());
+        model.autoplay_home = true;
+        assert!(model.on_event(AppEvent::HomeLoaded(vec![])).is_none());
+        assert!(!model.autoplay_home);
+        model.autoplay_home = true;
+        fold(&mut model, AppEvent::SessionInvalid);
+        assert!(
+            model
+                .on_event(AppEvent::HomeLoaded(vec![track_section()]))
+                .is_none()
+        );
+        model.autoplay_home = true;
+        model.on_api_error("offline".into());
+        assert!(!model.autoplay_home);
+    }
+
+    #[test]
+    fn manual_input_cancels_a_pending_startup_recommendation() {
+        let (runtime, _rx) = RuntimeHandle::stub();
+        let mut model = AppModel::new(Theme::default());
+        model.autoplay_home = true;
+        model.dispatch_key(key(KeyCode::Down), &runtime);
+        assert!(
+            model
+                .on_event(AppEvent::HomeLoaded(vec![track_section()]))
+                .is_none()
         );
     }
 
